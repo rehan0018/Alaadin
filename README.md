@@ -200,14 +200,3 @@ npm run dev
 ### 3. Run Automated Pytest Suite:
 ```bash
 python -m pytest tests/ -v
-```
-
----
-
-## 🧭 5-Minute Judge Demo Script
-
-1. **Minute 0–1 | Executive Dashboard**: Highlight Revenue at Risk, Recovered Revenue, and the **3-Way Benchmark Experiment Table**. Highlight: *"These numbers come from an apples-to-apples counterfactual benchmark, not hardcoded demo values."*
-2. **Minute 1–2 | Interactive Sandbox**: Select `BANK_SERVER_ERROR`, inspect $P(\text{recovery}) = 87\%$, optimal action `RETRY_DELAYED_30M`, ERV, itemized policy checklist, and click **Execute**.
-3. **Minute 2–3 | Agent Failure Lab**: Stress-test `Fraud Risk 0.91` (`✗ BLOCKED - Fraud Gate`) and `Already Succeeded` (`✗ BLOCKED - State Lock`).
-4. **Minute 3–4 | Live Command Center**: Click **Run Live (WS)** or **Batch 1k** to stream transactions via WebSocket through `Detect → Understand → Decide (ERV) → Policy Boundary → Act → Verify → Stop`.
-5. **Minute 4–5 | Audit Explorer**: Inspect the 5-step Decision Rationale and click **Export CSV** to demonstrate complete audit compliance.
