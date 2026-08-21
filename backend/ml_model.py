@@ -319,23 +319,6 @@ class RecoveryScorerModel:
             p_escalate = 0.30
             rationale_bullets.append("General payment failure")
 
-        decay = max(0.2, 1.0 - (retries * 0.25))
-        p_retry *= decay
-        p_link *= max(0.4, 1.0 - (retries * 0.15))
-        p_whatsapp *= max(0.4, 1.0 - (retries * 0.15))
-
-        if is_opted_out:
-            p_link = 0.0
-            p_whatsapp = 0.0
-            rationale_bullets.append("Customer opted out of direct messages")
-
-        if fraud > 0.65 or already_succeeded or elapsed_hours > 72:
-            p_retry = 0.0
-            p_link = 0.0
-            p_whatsapp = 0.0
-            p_escalate = 0.0
-            rationale_bullets.append("Safety policy threshold or state lock triggered")
-
         candidates = {
             "RETRY_DELAYED_30M": p_retry,
             "SEND_PAYMENT_LINK": p_link,
