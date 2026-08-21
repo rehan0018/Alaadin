@@ -1,4 +1,4 @@
-# RecoverAI (Alaadin) ⚡
+Alaadin 
 ### Autonomous AI Payment Recovery Agent
 **Track**: AI Revenue Recovery | **One-line Pitch**: *RecoverAI is an AI agent that identifies failed payments, determines why each payment failed, selects the safest recovery strategy, executes the recovery workflow, and continuously learns which intervention recovers the most revenue — while enforcing customer-contact limits and maintaining a complete audit trail.*
 
