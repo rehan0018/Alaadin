@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.env
+
+# Models & Data caches (if large, but keep small models)
+backend/data/*.csv.tmp
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+.DS_Store
+
+# Logs
+*.log
