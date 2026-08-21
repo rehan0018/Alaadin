@@ -9,10 +9,11 @@ import {
   Github, 
   Terminal,
   ShieldAlert,
-  Flame
+  Flame,
+  Tv
 } from 'lucide-react';
 
-export default function Navbar({ activeTab, setActiveTab }) {
+export default function Navbar({ activeTab, setActiveTab, onStartGuidedDemo }) {
   const navItems = [
     { id: 'executive', label: 'Executive ROI & Benchmark', icon: BarChart3 },
     { id: 'livestream', label: 'Agent Command Center', icon: Activity, badge: 'Live Demo' },
