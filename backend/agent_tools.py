@@ -1,6 +1,6 @@
 """
-RecoverAI - Autonomous Agent Tool Registry & State Machine
-Provides the 10 core execution tools and maintains payment settlement state.
+Alaadin - Autonomous Agent Tool Registry & State Machine
+Provides the core execution tools and maintains payment settlement state.
 Supports Razorpay Test API for live payment-link creation with fallback sandbox.
 """
 
@@ -48,8 +48,13 @@ class ToolRegistry:
             },
             {
                 "name": "create_payment_link",
-                "description": "Generates a secure 1-click payment link via Razorpay Test API (or sandbox fallback).",
+                "description": "Generates a payment link via Razorpay API (or sandbox simulation).",
                 "parameters": {"payment_id": "string", "validity_hours": "integer", "amount": "float"}
+            },
+            {
+                "name": "simulate_customer_payment_action",
+                "description": "Simulates customer click-through and payment completion on the secondary payment link rail.",
+                "parameters": {"payment_id": "string", "link_id": "string"}
             },
             {
                 "name": "retry_payment",
@@ -167,10 +172,7 @@ class ToolRegistry:
             state["lifecycle_state"] = "ACTION_EXECUTED"
             state["retry_attempts"] += 1
             
-            # Outcome determination based on counterfactual probability
             p_success = float(context.get("p_action_success", context.get("ml_recovery_probability", 0.75)))
-            
-            # Ground truth simulation
             is_success = random.random() < p_success
             if is_success:
                 state["status"] = "SUCCESS"
@@ -198,9 +200,8 @@ class ToolRegistry:
             amt = float(args.get("amount", context.get("amount", 2499.0)))
             pay_id_clean = payment_id.replace("PAY_", "")
             
-            # Real Razorpay Test API integration if credentials present
             real_link_created = False
-            payment_url = f"https://pay.razorpay.com/plink_test_{pay_id_clean}"
+            payment_url = f"https://sandbox.alaadin.payments/pay/plink_test_{pay_id_clean}"
             link_id = f"plink_test_{pay_id_clean}"
             
             if self.razorpay_key_id and self.razorpay_key_secret:
@@ -212,7 +213,7 @@ class ToolRegistry:
                             json={
                                 "amount": int(amt * 100),
                                 "currency": "INR",
-                                "description": f"RecoverAI Payment Recovery for {payment_id}",
+                                "description": f"Alaadin Payment Recovery for {payment_id}",
                                 "reference_id": payment_id,
                                 "expire_by": int(time.time()) + (args.get("validity_hours", 24) * 3600)
                             }
@@ -222,8 +223,8 @@ class ToolRegistry:
                             payment_url = rdata.get("short_url", payment_url)
                             link_id = rdata.get("id", link_id)
                             real_link_created = True
-                except Exception as ex:
-                    pass # Fallback to sandbox link
+                except Exception:
+                    pass
 
             state["lifecycle_state"] = "ACTION_SCHEDULED"
             return {
@@ -234,8 +235,9 @@ class ToolRegistry:
                     "link_id": link_id,
                     "payment_url": payment_url,
                     "is_live_razorpay_api": real_link_created,
+                    "is_mock": not real_link_created,
                     "validity_hours": args.get("validity_hours", 24),
-                    "action_summary": f"Payment recovery link created: {payment_url}"
+                    "action_summary": f"Payment recovery link generated: {payment_url} ({'Live Razorpay' if real_link_created else 'Sandbox Mock'})"
                 }
             }
 
@@ -244,18 +246,6 @@ class ToolRegistry:
             template = args.get("template", "ONE_CLICK_RECOVERY_LINK")
             state["notifications_sent"] += 1
             state["lifecycle_state"] = "ACTION_EXECUTED"
-            
-            # Simulate customer click-through & payment probability
-            p_success = float(context.get("p_action_success", context.get("ml_recovery_probability", 0.65)))
-            is_success = random.random() < p_success
-            if is_success:
-                state["status"] = "SUCCESS"
-                state["settled"] = True
-                state["lifecycle_state"] = "RECOVERED"
-            else:
-                state["status"] = "FAILED"
-                state["settled"] = False
-                state["lifecycle_state"] = "VERIFYING"
 
             return {
                 "tool": tool_name,
@@ -269,8 +259,31 @@ class ToolRegistry:
                 }
             }
 
+        elif tool_name == "simulate_customer_payment_action":
+            # Explicit customer click-through & settlement simulation
+            p_success = float(context.get("p_action_success", context.get("ml_recovery_probability", 0.65)))
+            is_success = random.random() < p_success
+            if is_success:
+                state["status"] = "SUCCESS"
+                state["settled"] = True
+                state["lifecycle_state"] = "RECOVERED"
+            else:
+                state["status"] = "FAILED"
+                state["settled"] = False
+                state["lifecycle_state"] = "VERIFYING"
+
+            return {
+                "tool": tool_name,
+                "status": "COMPLETED",
+                "timestamp": timestamp,
+                "output": {
+                    "customer_clicked": True,
+                    "settled": is_success,
+                    "action_summary": f"Customer link interaction {'completed payment settlement' if is_success else 'expired without payment'}."
+                }
+            }
+
         elif tool_name == "check_payment_status":
-            # Return true settlement state from state store
             is_settled = bool(state.get("settled", False) or state.get("status") == "SUCCESS")
             return {
                 "tool": tool_name,

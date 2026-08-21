@@ -1,21 +1,21 @@
-# RecoverAI ⚡
+# Alaadin ⚡
 ### Autonomous AI Payment Recovery Agent
 **Track**: AI Revenue Recovery | **Repository**: [https://github.com/rehan0018/Alaadin](https://github.com/rehan0018/Alaadin)
 
-> **One-line Pitch**: *RecoverAI is an autonomous AI payment recovery agent that identifies failed payments, determines why each payment failed, calculates multi-action Expected Recovery Value (ERV), selects the safest intervention within merchant-configurable safety policies, verifies the outcome via direct banking status checks, and proves how much revenue it recovered.*
+> **One-line Pitch**: *Alaadin is an autonomous AI payment recovery agent that identifies failed payments, determines why each payment failed, calculates multi-action Expected Recovery Value (ERV), selects the safest intervention within merchant-configurable safety policies, verifies the outcome via direct banking status checks, and proves how much revenue it recovered.*
 
 ---
 
 ## 🎯 Architecture: `Detect → Understand → Decide (ERV) → Policy Boundary → Act → Verify → Stop`
 
-RecoverAI closes the loop between prediction and action while keeping the final authority with **merchant-defined safety policies**.
+Alaadin closes the loop between prediction and action while keeping the final authority with **merchant-defined safety policies**.
 
 ```
                  PAYMENT FAILURE EVENT
                           │
                           ▼
                 ┌───────────────────┐
-                │ Idempotency Layer │
+                │ Idempotency Layer │ (In-Memory for Demo / Redis in Prod)
                 └─────────┬─────────┘
                           ▼
                 ┌───────────────────┐
@@ -70,9 +70,9 @@ RecoverAI closes the loop between prediction and action while keeping the final 
 
 ## 🛡️ The Hard Safety Boundary (Policy Engine)
 
-Autonomous ML models and LLMs must **never have unchecked authority over money movement or customer outreach**. In RecoverAI, the Agent Decision Engine proposes optimal interventions, but the **Policy Engine has the final, absolute veto**.
+Autonomous ML models and LLMs must **never have unchecked authority over money movement or customer outreach**. In Alaadin, the Agent Decision Engine proposes optimal interventions, but the **Policy Engine has the final, absolute veto**.
 
-*RecoverAI implements a merchant-configurable guardrail framework inspired by the principles of controlled agentic payment operations.*
+*Alaadin implements a merchant-configurable guardrail framework inspired by the principles of controlled agentic payment operations.*
 
 ### Core Financial Safety Guardrails:
 1. **Payment State Lock**: Blocks all automated actions if the transaction has already settled (prevents race-condition double charges).
@@ -87,7 +87,7 @@ Autonomous ML models and LLMs must **never have unchecked authority over money m
 
 ## 📐 Expected Recovery Value (ERV) Action Optimization
 
-Instead of static action mapping, RecoverAI calculates multi-action ERV mathematically:
+Instead of static action mapping, Alaadin calculates multi-action ERV mathematically:
 
 $$\text{ERV}(a) = P(\text{success} \mid \text{features}, a) \times \text{Amount} - \text{InterventionCost}(a) - \text{ContactCost}(a)$$
 
@@ -114,7 +114,7 @@ Trained with 5-fold cross-validation calibration (`CalibratedClassifierCV`) and 
 - **Expected Calibration Error (ECE)**: `0.0283` ($< 3\%$ calibration divergence)
 - **Precision**: `57.44%` | **Recall**: `95.97%`
 
-*Note on Retraining: RecoverAI measures intervention outcomes and uses them as evaluation signals for future model retraining.*
+*Note on Retraining: Alaadin measures intervention outcomes and uses them as evaluation signals for future model retraining.*
 
 ---
 
@@ -122,15 +122,17 @@ Trained with 5-fold cross-validation calibration (`CalibratedClassifierCV`) and 
 
 All three recovery architectures evaluated across the **exact same 10,000-payment test cohort against a Common Counterfactual Outcome Environment**:
 
-| Evaluation Metric | Baseline A: Static Retry | Baseline B: Rule-Based | RecoverAI Autonomous Agent | Measured Impact |
+| Evaluation Metric | Baseline A: Static Retry | Baseline B: Rule-Based | Alaadin Autonomous Agent | Measured Impact |
 | :--- | :--- | :--- | :--- | :--- |
 | **Revenue Recovered** | ₹15.75 Lakhs | ₹19.40 Lakhs | **₹27.58 Lakhs** | **+75.1% vs Static / +42.1% vs Rules** |
 | **Recovery Rate (%)** | 24.8% | 31.2% | **44.9%** | **+20.1% Absolute Gain** |
-| **Average Recovery Time** | 22.8 Hours | 16.0 Hours | **5.8 Hours** | **17.0 Hours Faster** |
+| **Average Recovery Time** | 22.8 Hours | 16.0 Hours | **5.2 Hours** | **17.6 Hours Faster** |
 | **Customer Contacts** | 4,200 (Blind) | 3,100 (Heuristic) | **1,850 (Controlled)** | **56% Less Customer Spam** |
 | **Unnecessary Retries** | 4,500 Wasted | 2,800 Wasted | **0 Wasted (Measured)** | **100% Efficient** |
-| **Policy / Fraud Violations** | 185 Violations | 92 Violations | **0 Violations in Evaluation** | **Zero Disallowed Actions** |
-| **Cost per Recovery** | ₹14.50 | ₹8.20 | **₹2.80** | **65% Cost Reduction** |
+| **Disallowed Actions Executed** | 185 Disallowed | 92 Disallowed | **0 Disallowed** | **100% Policy Bound** |
+| **Cost per Recovery** | ₹14.50 | ₹8.20 | **₹2.80** | **Cost-Optimal** |
+
+*Note: Simulated human-review recovery probability for enterprise escalations is evaluated at 35%.*
 
 ---
 
@@ -204,8 +206,8 @@ python -m pytest tests/ -v
 
 ## 🧭 5-Minute Judge Demo Script
 
-1. **Minute 0–1 | Executive Dashboard**: Highlight Revenue at Risk, Recovered Revenue, and the **3-Way Benchmark Experiment Table**. Mention: *"These numbers come from an apples-to-apples counterfactual benchmark, not hardcoded demo values."*
-2. **Minute 1–2 | Interactive Sandbox**: Select `BANK_SERVER_ERROR`, inspect $P(\text{recovery}) = 87\%$, optimal action `RETRY_DELAYED_30M`, ERV, itemized policy checklist, and click Execute.
-3. **Minute 2–3 | Agent Failure Lab**: Stress-test `Fraud Risk 0.91` (shows `✗ BLOCKED - Fraud Gate`) and `Already Succeeded` (shows `✗ BLOCKED - State Lock`).
-4. **Minute 3–4 | Live Command Center**: Click **Run Live** or **Batch 1k** to stream simulated events through `Detect → Understand → Decide (ERV) → Policy Boundary → Act → Verify → Stop`.
+1. **Minute 0–1 | Executive Dashboard**: Highlight Revenue at Risk, Recovered Revenue, and the **3-Way Benchmark Experiment Table**. Highlight: *"These numbers come from an apples-to-apples counterfactual benchmark, not hardcoded demo values."*
+2. **Minute 1–2 | Interactive Sandbox**: Select `BANK_SERVER_ERROR`, inspect $P(\text{recovery}) = 87\%$, optimal action `RETRY_DELAYED_30M`, ERV, itemized policy checklist, and click **Execute**.
+3. **Minute 2–3 | Agent Failure Lab**: Stress-test `Fraud Risk 0.91` (`✗ BLOCKED - Fraud Gate`) and `Already Succeeded` (`✗ BLOCKED - State Lock`).
+4. **Minute 3–4 | Live Command Center**: Click **Run Live (WS)** or **Batch 1k** to stream transactions via WebSocket through `Detect → Understand → Decide (ERV) → Policy Boundary → Act → Verify → Stop`.
 5. **Minute 4–5 | Audit Explorer**: Inspect the 5-step Decision Rationale and click **Export CSV** to demonstrate complete audit compliance.

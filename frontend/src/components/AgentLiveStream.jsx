@@ -19,7 +19,6 @@ import {
 
 export default function AgentLiveStream({ onSelectPayment }) {
   const [isRunning, setIsRunning] = useState(false);
-  const [speed, setSpeed] = useState(1); // 1x, 2x, 5x
   const [events, setEvents] = useState([]);
   const [liveRecoveredINR, setLiveRecoveredINR] = useState(0);
   const [liveAttempts, setLiveAttempts] = useState(0);
@@ -27,9 +26,9 @@ export default function AgentLiveStream({ onSelectPayment }) {
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchSuccessMsg, setBatchSuccessMsg] = useState(null);
+  const [razorpayStatus, setRazorpayStatus] = useState("SANDBOX FALLBACK");
 
   const socketRef = useRef(null);
-  const intervalRef = useRef(null);
 
   const pipelineStages = [
     { id: 'detect', label: '1. Detect', desc: 'Ingest Payment Event' },
@@ -40,7 +39,68 @@ export default function AgentLiveStream({ onSelectPayment }) {
     { id: 'verify', label: '6. Verify', desc: 'Check Settlement' },
   ];
 
-  // Fetch sample live payments via WebSocket or API
+  // Fetch API Health on mount to accurately display Razorpay integration mode
+  useEffect(() => {
+    fetch('/api/health')
+      .then(res => res.json())
+      .then(data => {
+        if (data.razorpay_api_configured) {
+          setRazorpayStatus("CONNECTED");
+        } else {
+          setRazorpayStatus("SANDBOX FALLBACK");
+        }
+      })
+      .catch(() => setRazorpayStatus("SANDBOX FALLBACK"));
+  }, []);
+
+  // WebSocket Connection for Live Event Stream
+  useEffect(() => {
+    if (isRunning) {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host || 'localhost:8000';
+      const wsUrl = `${protocol}//${host}/ws/stream`;
+      
+      const ws = new WebSocket(wsUrl);
+      socketRef.current = ws;
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === 'PAYMENT_EVENT') {
+            const data = message.data;
+            setActiveStepIndex((prev) => (prev + 1) % 6);
+            setEvents((prev) => [data, ...prev.slice(0, 49)]);
+            setLiveAttempts((prev) => prev + 1);
+
+            if (data.is_recovered) {
+              setLiveRecoveredINR((prev) => prev + data.recovered_amount);
+              setLiveSuccessCount((prev) => prev + 1);
+            }
+          }
+        } catch (e) {
+          console.error("Failed to parse WebSocket message", e);
+        }
+      };
+
+      ws.onerror = () => {
+        // Fallback to single REST step on WS error
+        processNextSimulatedEvent();
+      };
+
+      return () => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+      };
+    } else {
+      if (socketRef.current) {
+        socketRef.current.close();
+        socketRef.current = null;
+      }
+    }
+  }, [isRunning]);
+
+  // Single step trigger via REST
   const processNextSimulatedEvent = async () => {
     try {
       const sampleCodes = [
@@ -88,18 +148,6 @@ export default function AgentLiveStream({ onSelectPayment }) {
     }
   };
 
-  useEffect(() => {
-    if (isRunning) {
-      const delay = Math.max(400, 1500 / speed);
-      intervalRef.current = setInterval(processNextSimulatedEvent, delay);
-    } else {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [isRunning, speed]);
-
   const handleReset = () => {
     setIsRunning(false);
     setEvents([]);
@@ -120,7 +168,7 @@ export default function AgentLiveStream({ onSelectPayment }) {
       });
       if (res.ok) {
         const data = await res.json();
-        setBatchSuccessMsg(`Successfully simulated 1,000 transactions! Recovered ₹${data.summary.recovered_lakhs} Lakhs (${data.summary.recovery_rate_pct}% rate).`);
+        setBatchSuccessMsg(`Successfully simulated 1,000 transactions! Recovered ₹${data.summary.recovered_lakhs} Lakhs (${data.summary.recovery_rate_pct}% recovery rate, ₹${data.three_way_comparison.alaadin_agent.cost_per_recovery_inr} cost/recovery).`);
       }
     } catch (e) {
       console.error(e);
@@ -141,14 +189,18 @@ export default function AgentLiveStream({ onSelectPayment }) {
               <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isRunning ? 'bg-emerald-500' : 'bg-slate-600'}`}></span>
             </span>
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-sky-400">
-              Autonomous Command Center
+              Alaadin Command Center (WebSocket Stream)
             </span>
             <span className="text-xs text-slate-500">|</span>
             <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
               Environment: TEST / SANDBOX
             </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-sky-300 border border-slate-700">
-              Razorpay API: READY
+            <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+              razorpayStatus === 'CONNECTED' 
+                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' 
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}>
+              Razorpay API: {razorpayStatus}
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-bold text-white">
@@ -176,13 +228,13 @@ export default function AgentLiveStream({ onSelectPayment }) {
           <div className="flex items-center gap-2 bg-slate-900 p-1.5 rounded-xl border border-slate-800">
             <button
               onClick={() => setIsRunning(!isRunning)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
                 isRunning 
                   ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30 hover:bg-rose-500/30' 
                   : 'bg-emerald-500 text-slate-950 font-bold hover:bg-emerald-400 shadow-md'
               }`}
             >
-              {isRunning ? <><Pause className="h-3.5 w-3.5 fill-current" /> Pause</> : <><Play className="h-3.5 w-3.5 fill-current" /> Run Live</>}
+              {isRunning ? <><Pause className="h-3.5 w-3.5 fill-current" /> Pause</> : <><Play className="h-3.5 w-3.5 fill-current" /> Run Live (WS)</>}
             </button>
 
             <button
@@ -192,19 +244,6 @@ export default function AgentLiveStream({ onSelectPayment }) {
             >
               Step
             </button>
-
-            {/* Speed toggle */}
-            <div className="flex items-center bg-slate-950 rounded-lg p-0.5 border border-slate-800 text-[10px] font-mono">
-              {[1, 2, 5].map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setSpeed(s)}
-                  className={`px-2 py-1 rounded ${speed === s ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-white'}`}
-                >
-                  {s}x
-                </button>
-              ))}
-            </div>
 
             <button
               onClick={handleRunBatch1000}
@@ -287,15 +326,15 @@ export default function AgentLiveStream({ onSelectPayment }) {
               <div className="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto mb-3">
                 <Zap className="h-5 w-5 text-sky-400" />
               </div>
-              <h3 className="text-sm font-semibold text-slate-300">Ready to simulate failed transactions</h3>
+              <h3 className="text-sm font-semibold text-slate-300">Ready to stream live failed transactions</h3>
               <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-4">
-                Click "Run Live" to watch RecoverAI detect failed payments, optimize multi-action ERV, enforce policy safety boundaries, and verify banking settlements.
+                Click "Run Live (WS)" to watch Alaadin connect via WebSocket, detect failed payments, optimize multi-action ERV, enforce policy safety boundaries, and verify banking settlements.
               </p>
               <button
                 onClick={() => setIsRunning(true)}
                 className="px-4 py-2 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs"
               >
-                Start Live Stream
+                Start WebSocket Stream
               </button>
             </div>
           ) : (

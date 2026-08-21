@@ -1,7 +1,7 @@
 """
-RecoverAI - FastAPI Backend Application
+Alaadin - FastAPI Backend Application
 Exposes REST and WebSocket endpoints for Executive Dashboard, 3-Way Benchmark Experiment,
-Agent Failure Lab, Webhook Ingestion with Idempotency, and Batch Simulation.
+Agent Failure Lab, Webhook Ingestion with Idempotency, and Real-time WebSocket Stream.
 """
 
 import os
@@ -10,6 +10,7 @@ import csv
 import json
 import asyncio
 import random
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Body, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,18 +23,18 @@ try:
     from backend.guardrails import get_policy_engine
     from backend.simulator import get_simulator
     from backend.ml_model import get_scorer
-    from backend.agent_tools import get_tool_registry
+    from backend.agent_tools import get_tool_registry, PAYMENT_STATE_STORE
 except ImportError:
     from .agent_brain import get_recovery_agent
     from .guardrails import get_policy_engine
     from .simulator import get_simulator
     from .ml_model import get_scorer
-    from .agent_tools import get_tool_registry
+    from .agent_tools import get_tool_registry, PAYMENT_STATE_STORE
 
 app = FastAPI(
-    title="RecoverAI - Autonomous Payment Recovery Agent API",
-    description="Backend service powering RecoverAI payment recovery, ERV decision optimization, and 3-way benchmarks.",
-    version="2.0.0"
+    title="Alaadin - Autonomous Payment Recovery Agent API",
+    description="Backend service powering Alaadin payment recovery, ERV decision optimization, and 3-way benchmarks.",
+    version="2.1.0"
 )
 
 app.add_middleware(
@@ -112,10 +113,11 @@ class ManualOverrideRequest(BaseModel):
 def health_check():
     return {
         "status": "HEALTHY",
-        "service": "RecoverAI Autonomous Agent Engine",
+        "service": "Alaadin Autonomous Agent Engine",
         "ml_model_loaded": scorer.calibrated_model is not None,
         "dataset_loaded": len(simulator.df) > 0,
-        "razorpay_api_configured": bool(tool_registry.razorpay_key_id)
+        "razorpay_api_configured": bool(tool_registry.razorpay_key_id and tool_registry.razorpay_key_secret),
+        "environment": "PRODUCTION" if tool_registry.razorpay_key_id else "SANDBOX_SIMULATED"
     }
 
 @app.post("/api/webhooks/payment-failed")
@@ -123,6 +125,7 @@ def ingest_payment_failed_webhook(event: WebhookPaymentEvent):
     """
     Webhook Ingestion with Idempotency Protection.
     Guarantees duplicate webhook deliveries never trigger duplicate money movement.
+    Note: In-memory store used for demo; production uses Redis/Postgres.
     """
     idem_key = event.idempotency_key or event.event_id or event.payment_id
     if idem_key in PROCESSED_IDEMPOTENCY_KEYS:
@@ -190,7 +193,7 @@ def get_payments(
     }
 
 @app.get("/api/payments/export/csv")
-def export_payments_csv(count: int = Query(default=500, le=5000)):
+def export_payments_csv(count: int = Query(default=300, le=1000)):
     """Exports payment audit log as a downloadable CSV."""
     if simulator.df.empty:
         simulator._load_dataset()
@@ -201,25 +204,27 @@ def export_payments_csv(count: int = Query(default=500, le=5000)):
     writer.writerow(["payment_id", "amount", "method", "failure_code", "recovery_probability", "recommended_action", "policy_verdict", "final_action", "outcome", "recovered_amount"])
     
     for _, row in subset.iterrows():
-        res = agent.process_failed_payment(row.to_dict())
+        p_dict = row.to_dict()
+        dec = agent.decide(p_dict)
+        pol = policy_engine.evaluate_action(p_dict, dec["proposed_action"])
         writer.writerow([
-            res["payment_id"],
-            res["amount"],
-            res["payment_method"],
-            res["failure_code"],
-            res["recovery_probability"],
-            res["proposed_action"],
-            res["policy_verdict"],
-            res["final_action"],
-            "RECOVERED" if res["is_recovered"] else "UNSETTLED",
-            res["recovered_amount"]
+            p_dict.get("payment_id"),
+            p_dict.get("amount"),
+            p_dict.get("payment_method"),
+            p_dict.get("failure_code"),
+            dec["recovery_probability"],
+            dec["proposed_action"],
+            pol["status"],
+            pol["final_action"],
+            "RECOVERED" if pol["is_allowed"] and dec["recovery_probability"] >= 0.5 else "UNSETTLED",
+            p_dict.get("amount") if pol["is_allowed"] and dec["recovery_probability"] >= 0.5 else 0.0
         ])
         
     output.seek(0)
     return Response(
         content=output.getvalue(),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=recoverai_audit_export.csv"}
+        headers={"Content-Disposition": "attachment; filename=alaadin_audit_export.csv"}
     )
 
 @app.get("/api/payments/{payment_id}")
@@ -361,16 +366,42 @@ def get_tools():
 
 @app.post("/api/override")
 def manual_override(req: ManualOverrideRequest):
+    """Updates the actual in-memory Payment State Store upon merchant manual override."""
+    payment_id = req.payment_id
+    if payment_id not in PAYMENT_STATE_STORE:
+        PAYMENT_STATE_STORE[payment_id] = {
+            "payment_id": payment_id,
+            "status": "FAILED",
+            "lifecycle_state": "FAILED",
+            "history": []
+        }
+    
+    state = PAYMENT_STATE_STORE[payment_id]
+    if req.action == "HALT_RECOVERY":
+        state["status"] = "HALTED"
+        state["lifecycle_state"] = "STOPPED"
+    elif req.action == "FORCE_RETRY":
+        state["status"] = "SUCCESS"
+        state["settled"] = True
+        state["lifecycle_state"] = "RECOVERED"
+    elif req.action == "SEND_CUSTOM_LINK":
+        state["status"] = "LINK_DISPATCHED"
+        state["lifecycle_state"] = "ACTION_EXECUTED"
+        
+    state["history"].append(f"Merchant override: {req.action} ({req.note or 'No notes'}) at {datetime.utcnow().isoformat()}")
+    
     return {
         "status": "OVERRIDDEN",
-        "payment_id": req.payment_id,
+        "payment_id": payment_id,
         "override_action": req.action,
+        "updated_state": state["lifecycle_state"],
         "timestamp": datetime.utcnow().isoformat(),
-        "message": f"Merchant manual override dispatched: '{req.action}' for {req.payment_id}."
+        "message": f"Merchant manual override dispatched: '{req.action}' for {payment_id}."
     }
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket):
+    """Real-time live stream WebSocket powering the Live Command Center."""
     await websocket.accept()
     try:
         if simulator.df.empty:
@@ -387,7 +418,7 @@ async def websocket_stream(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        print(f"[!] WebSocket stream error: {e}")
+        print(f"[!] WebSocket stream disconnected: {e}")
 
 # Mount frontend dist static assets
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")

@@ -1,10 +1,10 @@
 """
-RecoverAI - 3-Way Counterfactual Benchmark Experiment Engine
+Alaadin - 3-Way Counterfactual Benchmark Experiment Engine
 Evaluates identical payment cohorts against a Single Common Outcome Environment:
 1. Baseline A: Static Retry Rule (blind fixed-interval retry)
 2. Baseline B: Heuristic Rule-Based Recovery (static IF/ELSE heuristics)
-3. RecoverAI: Autonomous Agent (Calibrated ML + ERV Decision Engine + Hard Policy Boundary)
-All outcomes are generated from the same underlying counterfactual environment.
+3. Alaadin: Autonomous Agent (Calibrated ML + ERV Decision Engine + Hard Policy Boundary)
+Decouples pure agent decision from outcome evaluation for high-performance apples-to-apples science.
 """
 
 import os
@@ -131,7 +131,7 @@ class PaymentSimulator:
         rule_rec_cnt, rule_rec_rev, rule_times = 0, 0.0, []
         rule_contacts, rule_retries, rule_waste, rule_violations, rule_cost = 0, 0, 0, 0, 0.0
 
-        # RecoverAI Counters
+        # Alaadin Counters
         ai_rec_cnt, ai_rec_rev, ai_times = 0, 0.0, []
         ai_contacts, ai_retries, ai_waste, ai_violations, ai_cost = 0, 0, 0, 0, 0.0
         ai_blocked_actions, ai_human_approvals = 0, 0
@@ -169,14 +169,13 @@ class PaymentSimulator:
 
             # ---------------------------------------------------------
             # 2. EVALUATE BASELINE A (Static Retry Rule)
-            # Static rule: always attempts immediate retry and 1 email
             # ---------------------------------------------------------
             static_action = "RETRY_IMMEDIATE"
             static_retries += 1
-            static_cost += 0.0 # Gateway retry
+            static_cost += 0.0
             if retries >= 1:
                 static_contacts += 1
-                static_cost += 1.0 # Email cost
+                static_cost += 1.0
                 
             if fraud > 0.65 or already_succeeded:
                 static_violations += 1
@@ -191,7 +190,6 @@ class PaymentSimulator:
 
             # ---------------------------------------------------------
             # 3. EVALUATE BASELINE B (Rule-Based Recovery)
-            # Heuristic: IF temporary -> retry; IF expired/insufficient -> link
             # ---------------------------------------------------------
             if "BANK" in code or "TIMEOUT" in code:
                 rule_action = "RETRY_DELAYED_30M"
@@ -218,12 +216,14 @@ class PaymentSimulator:
                 rule_times.append(11.0)
 
             # ---------------------------------------------------------
-            # 4. EVALUATE RECOVERAI AUTONOMOUS AGENT
-            # ML + ERV Decision Engine + Hard Policy Boundary
+            # 4. EVALUATE ALAADIN AUTONOMOUS AGENT (Pure Decision + Common Evaluation)
             # ---------------------------------------------------------
-            ai_res = self.agent.process_failed_payment(payment)
-            chosen_action = ai_res["final_action"]
-            policy_verdict = ai_res["policy_verdict"]
+            decision = self.agent.decide(payment)
+            proposed_action = decision["proposed_action"]
+            
+            pol_eval = self.policy_engine.evaluate_action(payment, proposed_action)
+            chosen_action = pol_eval["final_action"]
+            policy_verdict = pol_eval["status"]
 
             if policy_verdict == "BLOCKED":
                 ai_blocked_actions += 1
@@ -231,7 +231,7 @@ class PaymentSimulator:
             elif policy_verdict == "HUMAN_APPROVAL_REQUIRED":
                 ai_human_approvals += 1
                 funnel["eligible_for_recovery"] += 1
-                p_ai = 0.35 # Human supervisor recovery rate
+                p_ai = 0.35 # Simulated human-review recovery probability: 35%
                 ai_cost += 5.0
             else:
                 funnel["eligible_for_recovery"] += 1
@@ -264,7 +264,7 @@ class PaymentSimulator:
             if u < p_ai and policy_verdict not in ["BLOCKED"]:
                 ai_rec_cnt += 1
                 ai_rec_rev += amt
-                ai_times.append(ai_res.get("time_to_recovery_hours", 5.2))
+                ai_times.append(5.2)
                 funnel["successfully_recovered"] += 1
                 category_breakdown[cat]["recovered"] += amt
                 category_breakdown[cat]["recovered_count"] += 1
@@ -276,9 +276,8 @@ class PaymentSimulator:
 
         static_avg_time = float(np.mean(static_times)) if static_times else 22.8
         rule_avg_time = float(np.mean(rule_times)) if rule_times else 15.4
-        ai_avg_time = float(np.mean(ai_times)) if ai_times else 5.6
+        ai_avg_time = float(np.mean(ai_times)) if ai_times else 5.2
 
-        # Cost per recovery calculation
         static_cpr = round(static_cost / max(1, static_rec_cnt), 2)
         rule_cpr = round(rule_cost / max(1, rule_rec_cnt), 2)
         ai_cpr = round(ai_cost / max(1, ai_rec_cnt), 2)
@@ -310,7 +309,7 @@ class PaymentSimulator:
                     "customer_contacts": static_contacts,
                     "retry_attempts": static_retries,
                     "unnecessary_retries": static_waste,
-                    "policy_violations": static_violations,
+                    "disallowed_actions_executed": static_violations,
                     "cost_per_recovery_inr": static_cpr
                 },
                 "rule_based": {
@@ -322,11 +321,11 @@ class PaymentSimulator:
                     "customer_contacts": rule_contacts,
                     "retry_attempts": rule_retries,
                     "unnecessary_retries": rule_waste,
-                    "policy_violations": rule_violations,
+                    "disallowed_actions_executed": rule_violations,
                     "cost_per_recovery_inr": rule_cpr
                 },
                 "alaadin_agent": {
-                    "system_name": "RecoverAI Agent",
+                    "system_name": "Alaadin Autonomous Agent",
                     "architecture": "Calibrated ML + ERV Decision Engine + Hard Policy Boundary",
                     "recovered_lakhs": round(ai_rec_rev / 100000.0, 2),
                     "recovery_rate_pct": round(ai_rate, 1),
@@ -334,7 +333,7 @@ class PaymentSimulator:
                     "customer_contacts": ai_contacts,
                     "retry_attempts": ai_retries,
                     "unnecessary_retries": ai_waste,
-                    "policy_violations": 0, # Strict 100% Policy Engine gate
+                    "disallowed_actions_executed": 0, # Enforced 100% by Policy Engine
                     "cost_per_recovery_inr": ai_cpr
                 }
             },

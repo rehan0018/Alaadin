@@ -41,18 +41,18 @@ export default function ExecutiveDashboard({ stats, onTriggerLiveDemo }) {
   const { summary, three_way_comparison, measured_lift, funnel, category_breakdown } = stats;
 
   const funnelSteps = [
-    { label: 'Failed Payments', value: funnel?.failed_payments || 10000, color: 'bg-rose-500' },
-    { label: 'Policy Eligible', value: funnel?.eligible_for_recovery || 8850, color: 'bg-amber-500' },
-    { label: 'Contacted / Queued', value: funnel?.contacted_or_queued || 5420, color: 'bg-sky-500' },
-    { label: 'Retried / Link Clicked', value: funnel?.retried_or_link_clicked || 4980, color: 'bg-indigo-500' },
-    { label: 'Successfully Recovered', value: funnel?.successfully_recovered || 4490, color: 'bg-emerald-500' },
+    { label: 'Failed Payments', value: funnel?.failed_payments ?? 0, color: 'bg-rose-500' },
+    { label: 'Policy Eligible', value: funnel?.eligible_for_recovery ?? 0, color: 'bg-amber-500' },
+    { label: 'Contacted / Queued', value: funnel?.contacted_or_queued ?? 0, color: 'bg-sky-500' },
+    { label: 'Retried / Link Clicked', value: funnel?.retried_or_link_clicked ?? 0, color: 'bg-indigo-500' },
+    { label: 'Successfully Recovered', value: funnel?.successfully_recovered ?? 0, color: 'bg-emerald-500' },
   ];
 
   const categoryData = category_breakdown ? Object.keys(category_breakdown).map(k => ({
     category: k.replace('_', ' '),
     totalAtRisk: Math.round(category_breakdown[k].total_at_risk / 1000),
-    recovered: Math.round(category_breakdown[k].alaadin_recovered / 1000),
-    rate: Math.round((category_breakdown[k].alaadin_recovered_count / (category_breakdown[k].count || 1)) * 100)
+    recovered: Math.round(category_breakdown[k].recovered / 1000),
+    rate: Math.round((category_breakdown[k].recovered_count / (category_breakdown[k].count || 1)) * 100)
   })) : [];
 
   return (
@@ -74,7 +74,7 @@ export default function ExecutiveDashboard({ stats, onTriggerLiveDemo }) {
             </h1>
             <p className="text-sm text-slate-300 max-w-3xl mt-1 leading-relaxed">
               Detect → Understand → Decide (ERV) → Policy Boundary → Act → Verify → Stop.
-              Alaadin autonomously decides whether recovery is worthwhile, optimizes multi-channel interventions, enforces merchant safety guardrails, and empirically measures recovered revenue.
+              Alaadin autonomously decides whether recovery is worthwhile, optimizes multi-channel interventions, enforces merchant safety policies, and empirically measures recovered revenue.
             </p>
           </div>
           <button
@@ -82,7 +82,7 @@ export default function ExecutiveDashboard({ stats, onTriggerLiveDemo }) {
             className="self-start md:self-center px-5 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-sm font-semibold shadow-lg shadow-sky-500/25 flex items-center gap-2 transition-all duration-200 active:scale-95 whitespace-nowrap"
           >
             <Zap className="h-4 w-4 fill-current" />
-            Launch Live Killer Demo
+            Launch Live Demo
           </button>
         </div>
       </div>
@@ -158,7 +158,7 @@ export default function ExecutiveDashboard({ stats, onTriggerLiveDemo }) {
               {summary.avg_recovery_time_hours} hrs
             </div>
             <span className="text-xs text-emerald-400 mt-0.5 block font-medium">
-              Saved {measured_lift?.hours_saved_vs_static || '16.8'} hrs vs static
+              Saved {measured_lift?.hours_saved_vs_static ?? 0} hrs vs static
             </span>
           </div>
         </div>
@@ -176,7 +176,7 @@ export default function ExecutiveDashboard({ stats, onTriggerLiveDemo }) {
               {summary.blocked_guardrail_actions}
             </div>
             <span className="text-xs text-slate-500 mt-0.5 block">
-              0 Policy Violations (100% safe)
+              0 Disallowed Actions Executed
             </span>
           </div>
         </div>
@@ -239,22 +239,22 @@ export default function ExecutiveDashboard({ stats, onTriggerLiveDemo }) {
                 <td className="px-4 py-3.5 font-sans font-semibold text-white">Unnecessary Retries / Waste</td>
                 <td className="px-4 py-3.5 text-rose-400">{three_way_comparison?.static_retry?.unnecessary_retries} Wasted</td>
                 <td className="px-4 py-3.5 text-amber-400">{three_way_comparison?.rule_based?.unnecessary_retries} Wasted</td>
-                <td className="px-4 py-3.5 text-emerald-400 font-bold">0 Wasted</td>
-                <td className="px-4 py-3.5 text-emerald-400 font-semibold">100% Efficient</td>
+                <td className="px-4 py-3.5 text-emerald-400 font-bold">{three_way_comparison?.alaadin_agent?.unnecessary_retries} Wasted</td>
+                <td className="px-4 py-3.5 text-emerald-400 font-semibold">{measured_lift?.wasted_retries_eliminated} Eliminated</td>
               </tr>
               <tr className="hover:bg-slate-900/40">
-                <td className="px-4 py-3.5 font-sans font-semibold text-white">Policy / Fraud Violations</td>
-                <td className="px-4 py-3.5 text-rose-400">{three_way_comparison?.static_retry?.policy_violations} Violations</td>
-                <td className="px-4 py-3.5 text-rose-400">{three_way_comparison?.rule_based?.policy_violations} Violations</td>
-                <td className="px-4 py-3.5 text-emerald-400 font-bold">0 Violations</td>
-                <td className="px-4 py-3.5 text-emerald-400 font-semibold">Zero Fraud Chargebacks</td>
+                <td className="px-4 py-3.5 font-sans font-semibold text-white">Disallowed Actions Executed</td>
+                <td className="px-4 py-3.5 text-rose-400">{three_way_comparison?.static_retry?.disallowed_actions_executed} Disallowed</td>
+                <td className="px-4 py-3.5 text-rose-400">{three_way_comparison?.rule_based?.disallowed_actions_executed} Disallowed</td>
+                <td className="px-4 py-3.5 text-emerald-400 font-bold">0 Disallowed</td>
+                <td className="px-4 py-3.5 text-emerald-400 font-semibold">100% Policy Bound</td>
               </tr>
               <tr className="hover:bg-slate-900/40">
                 <td className="px-4 py-3.5 font-sans font-semibold text-white">Cost per Recovery</td>
-                <td className="px-4 py-3.5 text-slate-400">{three_way_comparison?.static_retry?.cost_per_recovery_inr}</td>
-                <td className="px-4 py-3.5 text-slate-400">{three_way_comparison?.rule_based?.cost_per_recovery_inr}</td>
-                <td className="px-4 py-3.5 text-emerald-300 font-bold">{three_way_comparison?.alaadin_agent?.cost_per_recovery_inr}</td>
-                <td className="px-4 py-3.5 text-emerald-400 font-semibold">65% Cost Reduction</td>
+                <td className="px-4 py-3.5 text-slate-400">₹{three_way_comparison?.static_retry?.cost_per_recovery_inr}</td>
+                <td className="px-4 py-3.5 text-slate-400">₹{three_way_comparison?.rule_based?.cost_per_recovery_inr}</td>
+                <td className="px-4 py-3.5 text-emerald-300 font-bold">₹{three_way_comparison?.alaadin_agent?.cost_per_recovery_inr}</td>
+                <td className="px-4 py-3.5 text-emerald-400 font-semibold">Cost-Optimal</td>
               </tr>
             </tbody>
           </table>
@@ -307,7 +307,7 @@ export default function ExecutiveDashboard({ stats, onTriggerLiveDemo }) {
           <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
             <span>Funnel Settlement Efficiency</span>
             <span className="font-bold text-emerald-400 font-mono">
-              {Math.round(((funnel?.successfully_recovered || 4400) / (funnel?.failed_payments || 10000)) * 100)}% Settled
+              {Math.round(((funnel?.successfully_recovered ?? 0) / (funnel?.failed_payments || 1)) * 100)}% Settled
             </span>
           </div>
         </div>

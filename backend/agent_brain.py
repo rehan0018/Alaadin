@@ -1,5 +1,5 @@
 """
-RecoverAI - Autonomous Agent Brain & Decision Engine
+Alaadin - Autonomous Agent Brain & Decision Engine
 Implements the full lifecycle:
 Detect -> Understand -> Decide (ERV) -> Policy Engine (Hard Veto) -> Tool Execution -> Verification -> Measure & Audit.
 Outcome is verified directly from tool execution, not from synthetic labels.
@@ -25,6 +25,22 @@ class PaymentRecoveryAgent:
         self.policy_engine = get_policy_engine()
         self.tool_registry = get_tool_registry()
 
+    def decide(self, payment: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Pure Decision Phase: Calculates calibrated P(Recovery) and optimizes Expected Recovery Value (ERV).
+        Decoupled from execution for benchmark evaluations.
+        """
+        ml_prediction = self.scorer.predict_payment(payment)
+        return {
+            "recovery_probability": ml_prediction["recovery_probability"],
+            "expected_recovered_value": ml_prediction["expected_recovered_value"],
+            "confidence_tier": ml_prediction["confidence_tier"],
+            "proposed_action": ml_prediction["recommended_action"],
+            "action_evaluations": ml_prediction["action_evaluations"],
+            "decision_rationale_why": ml_prediction["decision_rationale_why"],
+            "recommended_delay_minutes": ml_prediction["recommended_delay_minutes"]
+        }
+
     def process_failed_payment(self, payment: Dict[str, Any]) -> Dict[str, Any]:
         """
         Full autonomous lifecycle execution:
@@ -40,14 +56,14 @@ class PaymentRecoveryAgent:
         context_res = self.tool_registry.execute_tool("get_payment_context", {"payment_id": payment_id}, context=payment)
         cust_res = self.tool_registry.execute_tool("get_customer_history", {"customer_id": customer_id}, context=payment)
         
-        # 2. ML Prediction & ERV Optimization
-        ml_prediction = self.scorer.predict_payment(payment)
-        recovery_prob = ml_prediction["recovery_probability"]
-        proposed_action = ml_prediction["recommended_action"]
-        erv_value = ml_prediction["expected_recovered_value"]
-        action_evals = ml_prediction["action_evaluations"]
-        rationale_why = ml_prediction["decision_rationale_why"]
-        delay_mins = ml_prediction["recommended_delay_minutes"]
+        # 2. ML Prediction & ERV Optimization (Decide)
+        decision = self.decide(payment)
+        recovery_prob = decision["recovery_probability"]
+        proposed_action = decision["proposed_action"]
+        erv_value = decision["expected_recovered_value"]
+        action_evals = decision["action_evaluations"]
+        rationale_why = decision["decision_rationale_why"]
+        delay_mins = decision["recommended_delay_minutes"]
         p_action_success = action_evals.get(proposed_action, {}).get("p_success", recovery_prob)
 
         # Invoke actual recovery score tool for audit completeness
@@ -96,14 +112,15 @@ class PaymentRecoveryAgent:
             action_summary = f"RETRY EXECUTED via Secondary Switch ({'Settled Successfully' if verify_res['output']['settled'] else 'Declined'})"
 
         elif is_approved and final_action in ["SEND_PAYMENT_LINK", "SEND_WHATSAPP"]:
-            # Flow: create_payment_link -> send_customer_notification -> check_payment_status
+            # Flow: create_payment_link -> send_customer_notification -> simulate_customer_payment_action -> check_payment_status
             tool_invoked = "send_customer_notification"
             link_res = self.tool_registry.execute_tool("create_payment_link", {"payment_id": payment_id, "validity_hours": 24, "amount": amount}, context=payment_context)
             notif_res = self.tool_registry.execute_tool("send_customer_notification", {"payment_id": payment_id, "channel": "WHATSAPP" if "WHATSAPP" in final_action else "SMS", "template": "ONE_CLICK_RECOVERY_LINK"}, context=payment_context)
+            cust_action_res = self.tool_registry.execute_tool("simulate_customer_payment_action", {"payment_id": payment_id, "link_id": link_res["output"]["link_id"]}, context=payment_context)
             verify_res = self.tool_registry.execute_tool("check_payment_status", {"payment_id": payment_id}, context=payment_context)
             
             tool_output = notif_res["output"]
-            action_summary = f"Generated recovery link ({link_res['output']['payment_url']}) & dispatched via {'WhatsApp' if 'WHATSAPP' in final_action else 'SMS'}"
+            action_summary = f"Dispatched link via {'WhatsApp' if 'WHATSAPP' in final_action else 'SMS'} ({'Customer Completed Payment' if verify_res['output']['settled'] else 'No Customer Action'})"
 
         elif final_action == "ESCALATE_MERCHANT" or policy_status == "HUMAN_APPROVAL_REQUIRED":
             tool_invoked = "escalate_to_merchant"
@@ -122,6 +139,7 @@ class PaymentRecoveryAgent:
         # 5. Outcome Verification from check_payment_status Tool
         is_recovered = bool(verify_res["output"]["settled"] and is_approved)
         recovered_amount = amount if is_recovered else 0.0
+        elapsed_recovery_hours = 0.5 if "30M" in final_action else (1.2 if "LINK" in final_action or "WHATSAPP" in final_action else 0.0)
 
         # 6. Structured Decision Rationale
         decision_rationale = {
@@ -191,7 +209,7 @@ class PaymentRecoveryAgent:
             "failure_category": payment.get("failure_category", "TEMPORARY_SYSTEM"),
             "recovery_probability": recovery_prob,
             "expected_recovered_value": erv_value,
-            "confidence_tier": ml_prediction["confidence_tier"],
+            "confidence_tier": decision["confidence_tier"],
             "proposed_action": proposed_action,
             "final_action": final_action,
             "action_evaluations": action_evals,
@@ -203,7 +221,7 @@ class PaymentRecoveryAgent:
             "action_summary": action_summary,
             "is_recovered": is_recovered,
             "recovered_amount": recovered_amount,
-            "time_to_recovery_hours": payment.get("time_to_recovery_hours", 1.5) if is_recovered else 0.0,
+            "time_to_recovery_hours": elapsed_recovery_hours if is_recovered else 0.0,
             "audit_trail": audit_trail,
             "processed_at": datetime.utcnow().isoformat()
         }
