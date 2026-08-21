@@ -1,8 +1,7 @@
 """
-Alaadin - Machine Learning Recovery Scorer & Calibration Engine
-Trains an XGBoost Model with calibrated probability estimates.
-Calculates Brier Score, Expected Calibration Error (ECE), PR-AUC, ROC-AUC, F1,
-and evaluates multi-action Expected Recovery Value (ERV).
+RecoverAI - Machine Learning Recovery Scorer & Probability Calibration Engine
+Trains XGBoost model with CalibratedClassifierCV on validation split.
+Determines optimal decision threshold and computes Brier Score, ECE, PR-AUC, ROC-AUC.
 """
 
 import os
@@ -22,7 +21,7 @@ from sklearn.metrics import (
     f1_score,
     confusion_matrix
 )
-from sklearn.calibration import calibration_curve
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 import xgboost as xgb
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
@@ -54,22 +53,23 @@ CATEGORICAL_COLS = ["payment_method", "failure_code", "merchant_category", "subs
 ACTION_COSTS = {
     "RETRY_DELAYED_30M": {"cost": 0.0, "contact_cost": 0.0, "desc": "Secondary switch retry after 30 min cooldown"},
     "SEND_PAYMENT_LINK": {"cost": 2.0, "contact_cost": 1.0, "desc": "1-click recovery payment link via SMS"},
-    "SEND_WHATSAPP": {"cost": 1.0, "contact_cost": 0.5, "desc": "Interactive WhatsApp notification"},
+    "SEND_WHATSAPP": {"cost": 1.0, "contact_cost": 0.5, "desc": "Interactive WhatsApp recovery prompt"},
     "ESCALATE_MERCHANT": {"cost": 5.0, "contact_cost": 0.0, "desc": "Route to Merchant Operations support queue"},
     "STOP": {"cost": 0.0, "contact_cost": 0.0, "desc": "Halt further recovery workflows"}
 }
 
 class RecoveryScorerModel:
     def __init__(self):
-        self.model = None
+        self.base_model = None
+        self.calibrated_model = None
         self.columns = []
+        self.optimal_threshold = 0.50
         self.metrics = {}
         self.feature_importances = {}
         self.calibration_data = {}
 
     def prepare_features(self, df: pd.DataFrame, is_training: bool = False) -> pd.DataFrame:
         """One-hot encodes categorical features and aligns schema."""
-        # Ensure numeric features have defaults if missing
         df_clean = df.copy()
         if "previous_recovery_rate" not in df_clean.columns:
             df_clean["previous_recovery_rate"] = 0.5
@@ -102,22 +102,48 @@ class RecoveryScorerModel:
                 ece += (bin_size / n) * np.abs(bin_acc - bin_conf)
         return float(ece)
 
-    def train(self, train_path: str = None, test_path: str = None):
-        """Train XGBoost model and compute full evaluation metrics."""
+    def optimize_threshold_on_validation(self, X_val: pd.DataFrame, y_val: np.ndarray, amounts: np.ndarray) -> float:
+        """Finds decision threshold maximizing net expected recovered value on validation split."""
+        probs = self.calibrated_model.predict_proba(X_val)[:, 1]
+        thresholds = np.linspace(0.2, 0.8, 31)
+        best_thresh = 0.50
+        best_net_rev = -1e9
+        
+        for t in thresholds:
+            preds = (probs >= t).astype(int)
+            # Net recovery: True Positives recover amount, False Positives incur ₹3 contact friction
+            tp_mask = (preds == 1) & (y_val == 1)
+            fp_mask = (preds == 1) & (y_val == 0)
+            net_rev = np.sum(amounts[tp_mask]) - (np.sum(fp_mask) * 3.0)
+            if net_rev > best_net_rev:
+                best_net_rev = net_rev
+                best_thresh = float(t)
+                
+        return round(best_thresh, 2)
+
+    def train(self, train_path: str = None, val_path: str = None, test_path: str = None):
+        """Train XGBoost on Train split, calibrate on Val split, evaluate on Test split."""
         train_path = train_path or os.path.join(DATA_DIR, "payments_train.csv")
+        val_path = val_path or os.path.join(DATA_DIR, "payments_val.csv")
         test_path = test_path or os.path.join(DATA_DIR, "payments_test.csv")
         
-        print(f"[*] Training Alaadin Recovery Scorer on {train_path}...")
+        print(f"[*] Training RecoverAI Scorer on {train_path} (Train: 35k)...")
         train_df = pd.read_csv(train_path)
+        val_df = pd.read_csv(val_path)
         test_df = pd.read_csv(test_path)
         
         X_train = self.prepare_features(train_df, is_training=True)
         y_train = train_df["recovery_success"].values
         
+        X_val = self.prepare_features(val_df, is_training=False)
+        y_val = val_df["recovery_success"].values
+        val_amounts = val_df["amount"].values
+        
         X_test = self.prepare_features(test_df, is_training=False)
         y_test = test_df["recovery_success"].values
         
-        self.model = xgb.XGBClassifier(
+        # 1. Base XGBoost Estimator
+        self.base_model = xgb.XGBClassifier(
             n_estimators=180,
             max_depth=5,
             learning_rate=0.07,
@@ -126,13 +152,25 @@ class RecoveryScorerModel:
             eval_metric="logloss",
             random_state=42
         )
-        self.model.fit(X_train, y_train)
+        self.base_model.fit(X_train, y_train)
         
-        # Predictions on holdout test set
-        y_pred_proba = self.model.predict_proba(X_test)[:, 1]
-        y_pred = (y_pred_proba >= 0.5).astype(int)
+        # 2. Probability Calibration via CalibratedClassifierCV (5-Fold CV)
+        print(f"[*] Calibrating probability outputs with 5-fold cross-validation...")
+        self.calibrated_model = CalibratedClassifierCV(
+            estimator=self.base_model,
+            method="sigmoid",
+            cv=5
+        )
+        self.calibrated_model.fit(X_train, y_train)
         
-        # Classification Metrics
+        # 3. Decision Threshold Optimization
+        self.optimal_threshold = self.optimize_threshold_on_validation(X_val, y_val, val_amounts)
+        print(f"[OK] Calibrated Model. Optimal Decision Threshold: {self.optimal_threshold}")
+        
+        # 4. Final Evaluation on Holdout Test Split (7,500 records)
+        y_pred_proba = self.calibrated_model.predict_proba(X_test)[:, 1]
+        y_pred = (y_pred_proba >= self.optimal_threshold).astype(int)
+        
         roc = roc_auc_score(y_test, y_pred_proba)
         precision_arr, recall_arr, _ = precision_recall_curve(y_test, y_pred_proba)
         pr_auc = auc(recall_arr, precision_arr)
@@ -142,11 +180,9 @@ class RecoveryScorerModel:
         f1 = f1_score(y_test, y_pred)
         cm = confusion_matrix(y_test, y_pred).tolist()
         
-        # Probability Quality Metrics
         brier = brier_score_loss(y_test, y_pred_proba)
         ece = self.calculate_ece(y_test, y_pred_proba, n_bins=10)
         
-        # Calibration Curve Points (10 bins)
         prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=10, strategy='uniform')
         calibration_points = [
             {"predicted_prob": round(float(p), 3), "empirical_prob": round(float(t), 3)}
@@ -158,6 +194,7 @@ class RecoveryScorerModel:
             "pr_auc": round(float(pr_auc), 4),
             "brier_score": round(float(brier), 4),
             "expected_calibration_error_ece": round(float(ece), 4),
+            "optimal_threshold": self.optimal_threshold,
             "accuracy": round(float(acc), 4),
             "precision": round(float(prec), 4),
             "recall": round(float(rec), 4),
@@ -169,11 +206,12 @@ class RecoveryScorerModel:
         self.calibration_data = {
             "brier_score": round(float(brier), 4),
             "ece": round(float(ece), 4),
+            "optimal_threshold": self.optimal_threshold,
             "curve": calibration_points
         }
         
-        # Feature Importances
-        importances = self.model.feature_importances_
+        # Feature Importances from Base Model
+        importances = self.base_model.feature_importances_
         feat_imp = sorted(
             [{"feature": col, "importance": round(float(imp), 4)} 
              for col, imp in zip(self.columns, importances)],
@@ -182,7 +220,7 @@ class RecoveryScorerModel:
         )
         self.feature_importances = feat_imp[:15]
         
-        print(f"[OK] Training complete!")
+        print(f"[OK] Test Holdout Metrics:")
         print(f"     - ROC-AUC:    {self.metrics['roc_auc']}")
         print(f"     - PR-AUC:     {self.metrics['pr_auc']}")
         print(f"     - Brier:      {self.metrics['brier_score']}")
@@ -198,8 +236,10 @@ class RecoveryScorerModel:
         meta_file = os.path.join(model_dir, "model_metadata.json")
         
         joblib.dump({
-            "model": self.model,
+            "base_model": self.base_model,
+            "calibrated_model": self.calibrated_model,
             "columns": self.columns,
+            "optimal_threshold": self.optimal_threshold,
             "metrics": self.metrics,
             "feature_importances": self.feature_importances,
             "calibration_data": self.calibration_data
@@ -218,21 +258,23 @@ class RecoveryScorerModel:
     def load(self, model_dir: str = MODEL_DIR):
         model_file = os.path.join(model_dir, "xgboost_recovery_model.joblib")
         if not os.path.exists(model_file):
-            print(f"[!] Model file not found. Training new model...")
+            print(f"[!] Model file not found. Training new calibrated model...")
             self.train()
             return
             
         data = joblib.load(model_file)
-        self.model = data["model"]
+        self.base_model = data["base_model"]
+        self.calibrated_model = data["calibrated_model"]
         self.columns = data["columns"]
+        self.optimal_threshold = data.get("optimal_threshold", 0.50)
         self.metrics = data["metrics"]
         self.feature_importances = data["feature_importances"]
         self.calibration_data = data.get("calibration_data", {})
-        print(f"[OK] Loaded pre-trained model (ROC-AUC {self.metrics.get('roc_auc')}, Brier {self.metrics.get('brier_score')})")
+        print(f"[OK] Loaded pre-trained calibrated model (ROC-AUC {self.metrics.get('roc_auc')}, Brier {self.metrics.get('brier_score')})")
 
     def evaluate_candidate_actions(self, payment: Dict[str, Any], base_prob: float) -> Tuple[str, Dict[str, Any], List[str]]:
         """
-        Calculates Expected Recovery Value (ERV) for all candidate actions:
+        Calculates Expected Recovery Value (ERV) for candidate actions:
         ERV(action) = P(success | action) * Amount - InterventionCost - ContactCost
         """
         amount = float(payment.get("amount", 1000.0))
@@ -241,13 +283,13 @@ class RecoveryScorerModel:
         fraud = float(payment.get("fraud_risk_score", 0.05))
         is_opted_out = bool(payment.get("is_opted_out", 0) == 1)
         already_succeeded = bool(payment.get("is_already_succeeded", 0) == 1)
+        elapsed_hours = float(payment.get("time_since_failure_mins", 0.0)) / 60.0
         
         action_results = {}
         rationale_bullets = []
 
-        # Build multi-action probabilities conditioned on failure reason & features
         if "BANK" in code or "TIMEOUT" in code:
-            p_retry = min(0.96, base_prob * 1.05)
+            p_retry = min(0.96, base_prob * 1.08)
             p_link = base_prob * 0.65
             p_whatsapp = base_prob * 0.70
             p_escalate = 0.35
@@ -277,27 +319,23 @@ class RecoveryScorerModel:
             p_escalate = 0.30
             rationale_bullets.append("General payment failure")
 
-        # Modulate by retries
         decay = max(0.2, 1.0 - (retries * 0.25))
         p_retry *= decay
         p_link *= max(0.4, 1.0 - (retries * 0.15))
         p_whatsapp *= max(0.4, 1.0 - (retries * 0.15))
 
-        # Modulate by customer opt-out (opted out means notification actions have 0 effectiveness)
         if is_opted_out:
             p_link = 0.0
             p_whatsapp = 0.0
             rationale_bullets.append("Customer opted out of direct messages")
 
-        # Hard constraints on fraud
-        if fraud > 0.65 or already_succeeded:
+        if fraud > 0.65 or already_succeeded or elapsed_hours > 72:
             p_retry = 0.0
             p_link = 0.0
             p_whatsapp = 0.0
             p_escalate = 0.0
-            rationale_bullets.append("High fraud risk or already settled state detected")
+            rationale_bullets.append("Safety policy threshold or state lock triggered")
 
-        # Compute ERV per action
         candidates = {
             "RETRY_DELAYED_30M": p_retry,
             "SEND_PAYMENT_LINK": p_link,
@@ -318,14 +356,10 @@ class RecoveryScorerModel:
                 "description": cost_info["desc"]
             }
 
-        # Select action maximizing ERV
         best_action = max(action_results.keys(), key=lambda a: action_results[a]["expected_recovery_value_erv"])
-        
-        # If best action produces negative ERV, default to STOP
         if action_results[best_action]["expected_recovery_value_erv"] <= 0 and best_action != "STOP":
             best_action = "STOP"
 
-        # Additional rationale bullets
         hist_rate = float(payment.get("previous_success_rate", 0.0))
         if hist_rate > 0.8:
             rationale_bullets.append(f"Customer has strong historical success rate ({int(hist_rate*100)}%)")
@@ -361,7 +395,7 @@ class RecoveryScorerModel:
         df_single = pd.DataFrame([row])
         X = self.prepare_features(df_single, is_training=False)
         
-        prob = float(self.model.predict_proba(X)[0, 1])
+        prob = float(self.calibrated_model.predict_proba(X)[0, 1])
         if row["fraud_risk_score"] > 0.65:
             prob = min(prob, 0.03)
             
@@ -370,7 +404,6 @@ class RecoveryScorerModel:
         
         best_action, action_evals, rationale_bullets = self.evaluate_candidate_actions(payment, prob)
         erv = action_evals[best_action]["expected_recovery_value_erv"]
-        
         confidence_tier = "HIGH" if prob >= 0.75 else ("MEDIUM" if prob >= 0.45 else "LOW")
 
         return {

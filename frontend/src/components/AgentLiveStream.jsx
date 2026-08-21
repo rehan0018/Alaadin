@@ -9,12 +9,12 @@ import {
   CheckCircle2, 
   XCircle, 
   AlertTriangle, 
-  ArrowRight, 
   Clock, 
   DollarSign, 
   Sparkles,
   Eye,
-  Sliders
+  Layers,
+  Radio
 } from 'lucide-react';
 
 export default function AgentLiveStream({ onSelectPayment }) {
@@ -25,6 +25,8 @@ export default function AgentLiveStream({ onSelectPayment }) {
   const [liveAttempts, setLiveAttempts] = useState(0);
   const [liveSuccessCount, setLiveSuccessCount] = useState(0);
   const [activeStepIndex, setActiveStepIndex] = useState(0);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchSuccessMsg, setBatchSuccessMsg] = useState(null);
 
   const socketRef = useRef(null);
   const intervalRef = useRef(null);
@@ -32,25 +34,24 @@ export default function AgentLiveStream({ onSelectPayment }) {
   const pipelineStages = [
     { id: 'detect', label: '1. Detect', desc: 'Ingest Payment Event' },
     { id: 'understand', label: '2. Understand', desc: 'Diagnose Root Cause' },
-    { id: 'decide', label: '3. Decide', desc: 'ML Recovery Score & Tool' },
-    { id: 'guardrails', label: '4. Guardrails', desc: 'Policy Engine Check' },
-    { id: 'act', label: '5. Act', desc: 'Execute Strategy' },
-    { id: 'measure', label: '6. Measure', desc: 'Evaluate & Stop' },
+    { id: 'decide', label: '3. Decide', desc: 'Calibrated ML & ERV' },
+    { id: 'guardrails', label: '4. Policy Gate', desc: 'Hard Boundary Veto' },
+    { id: 'act', label: '5. Act', desc: 'Execute Tool & Retry' },
+    { id: 'verify', label: '6. Verify', desc: 'Check Settlement' },
   ];
 
-  // Fetch sample live payments via polling or backend test endpoint
+  // Fetch sample live payments via WebSocket or API
   const processNextSimulatedEvent = async () => {
     try {
-      // Pick random simulated event
       const sampleCodes = [
-        { code: "BANK_SERVER_ERROR", method: "UPI", amt: 2499.0, successRate: 0.92, retries: 0, fraud: 0.03 },
-        { code: "INSUFFICIENT_FUNDS", method: "DEBIT_CARD", amt: 1499.0, successRate: 0.75, retries: 1, fraud: 0.04 },
-        { code: "CARD_EXPIRED", method: "CREDIT_CARD", amt: 899.0, successRate: 0.60, retries: 0, fraud: 0.02 },
-        { code: "NETWORK_TIMEOUT", method: "UPI", amt: 4999.0, successRate: 0.95, retries: 0, fraud: 0.01 },
-        { code: "AUTH_FAILED_OTP_TIMEOUT", method: "UPI", amt: 1999.0, successRate: 0.82, retries: 0, fraud: 0.05 },
-        { code: "FRAUD_SUSPECTED", method: "CREDIT_CARD", amt: 35000.0, successRate: 0.20, retries: 0, fraud: 0.88 },
-        { code: "UPI_TRANSACTION_LIMIT", method: "UPI", amt: 12500.0, successRate: 0.89, retries: 1, fraud: 0.02 },
-        { code: "MANDATE_EXECUTION_FAILED", method: "MANDATE", amt: 999.0, successRate: 0.94, retries: 1, fraud: 0.01 },
+        { code: "BANK_SERVER_ERROR", method: "UPI", amt: 2499.0, successRate: 0.92, retries: 0, fraud: 0.03, mins: 10 },
+        { code: "INSUFFICIENT_FUNDS", method: "DEBIT_CARD", amt: 1499.0, successRate: 0.75, retries: 1, fraud: 0.04, mins: 45 },
+        { code: "CARD_EXPIRED", method: "CREDIT_CARD", amt: 899.0, successRate: 0.60, retries: 0, fraud: 0.02, mins: 15 },
+        { code: "NETWORK_TIMEOUT", method: "UPI", amt: 4999.0, successRate: 0.95, retries: 0, fraud: 0.01, mins: 5 },
+        { code: "AUTH_FAILED_OTP_TIMEOUT", method: "UPI", amt: 1999.0, successRate: 0.82, retries: 0, fraud: 0.05, mins: 20 },
+        { code: "FRAUD_SUSPECTED", method: "CREDIT_CARD", amt: 35000.0, successRate: 0.20, retries: 0, fraud: 0.88, mins: 2 },
+        { code: "UPI_TRANSACTION_LIMIT", method: "UPI", amt: 12500.0, successRate: 0.89, retries: 1, fraud: 0.02, mins: 60 },
+        { code: "MANDATE_EXECUTION_FAILED", method: "MANDATE", amt: 999.0, successRate: 0.94, retries: 1, fraud: 0.01, mins: 30 },
       ];
 
       const sample = sampleCodes[Math.floor(Math.random() * sampleCodes.length)];
@@ -66,6 +67,7 @@ export default function AgentLiveStream({ onSelectPayment }) {
           failure_code: sample.code,
           previous_success_rate: sample.successRate,
           retry_count: sample.retries,
+          time_since_failure_mins: sample.mins,
           fraud_risk_score: sample.fraud
         })
       });
@@ -73,10 +75,8 @@ export default function AgentLiveStream({ onSelectPayment }) {
       if (!response.ok) return;
       const data = await response.json();
 
-      // Cycle stage indicator
       setActiveStepIndex((prev) => (prev + 1) % 6);
-
-      setEvents((prev) => [data, ...prev.slice(0, 49)]); // Keep last 50 events
+      setEvents((prev) => [data, ...prev.slice(0, 49)]);
       setLiveAttempts((prev) => prev + 1);
 
       if (data.is_recovered) {
@@ -106,12 +106,26 @@ export default function AgentLiveStream({ onSelectPayment }) {
     setLiveRecoveredINR(0);
     setLiveAttempts(0);
     setLiveSuccessCount(0);
+    setBatchSuccessMsg(null);
   };
 
   const handleRunBatch1000 = async () => {
-    setIsRunning(false);
-    for (let i = 0; i < 8; i++) {
-      await processNextSimulatedEvent();
+    setBatchLoading(true);
+    setBatchSuccessMsg(null);
+    try {
+      const res = await fetch('/api/simulate/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sample_size: 1000 })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBatchSuccessMsg(`Successfully simulated 1,000 transactions! Recovered ₹${data.summary.recovered_lakhs} Lakhs (${data.summary.recovery_rate_pct}% rate).`);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setBatchLoading(false);
     }
   };
 
@@ -121,19 +135,24 @@ export default function AgentLiveStream({ onSelectPayment }) {
       {/* Top Header & Ticker */}
       <div className="glass-card rounded-2xl p-6 border border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex flex-wrap items-center gap-2 mb-1">
             <span className="flex h-2.5 w-2.5 relative">
               <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isRunning ? 'bg-emerald-400 opacity-75' : 'bg-slate-500'}`}></span>
               <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isRunning ? 'bg-emerald-500' : 'bg-slate-600'}`}></span>
             </span>
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-sky-400">
-              Agent Live Command Center
+              Autonomous Command Center
             </span>
             <span className="text-xs text-slate-500">|</span>
-            <span className="text-xs text-slate-400">Real-Time Autonomous Execution</span>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
+              Environment: TEST / SANDBOX
+            </span>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-sky-300 border border-slate-700">
+              Razorpay API: READY
+            </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-bold text-white">
-            Autonomous Pipeline: Detect → Understand → Decide → Act → Measure
+            Detect → Understand → Decide (ERV) → Policy Boundary → Act → Verify → Stop
           </h1>
         </div>
 
@@ -188,6 +207,15 @@ export default function AgentLiveStream({ onSelectPayment }) {
             </div>
 
             <button
+              onClick={handleRunBatch1000}
+              disabled={batchLoading}
+              className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold"
+              title="Run 1,000 Batch Simulation"
+            >
+              {batchLoading ? 'Simulating...' : 'Batch 1k'}
+            </button>
+
+            <button
               onClick={handleReset}
               className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800"
               title="Reset Live Stream"
@@ -198,6 +226,13 @@ export default function AgentLiveStream({ onSelectPayment }) {
 
         </div>
       </div>
+
+      {batchSuccessMsg && (
+        <div className="px-5 py-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-fade-in">
+          <CheckCircle2 className="h-4 w-4" />
+          {batchSuccessMsg}
+        </div>
+      )}
 
       {/* Visual Animated Pipeline Stage Nodes */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -242,7 +277,7 @@ export default function AgentLiveStream({ onSelectPayment }) {
             </span>
           </div>
           <span className="text-xs text-slate-400 hidden sm:block">
-            Click any event card to inspect complete step-by-step ReAct audit trail
+            Click any event card to inspect structured Decision Rationale & itemized policy verification
           </span>
         </div>
 
@@ -254,7 +289,7 @@ export default function AgentLiveStream({ onSelectPayment }) {
               </div>
               <h3 className="text-sm font-semibold text-slate-300">Ready to simulate failed transactions</h3>
               <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-4">
-                Click "Run Live" or "Step" above to watch RecoverAI detect failed payments, score recovery probability via ML, test policy guardrails, and execute actions.
+                Click "Run Live" to watch RecoverAI detect failed payments, optimize multi-action ERV, enforce policy safety boundaries, and verify banking settlements.
               </p>
               <button
                 onClick={() => setIsRunning(true)}
@@ -279,18 +314,15 @@ export default function AgentLiveStream({ onSelectPayment }) {
                     <span className="font-mono text-xs font-bold text-emerald-400">
                       ₹{evt.amount?.toLocaleString()}
                     </span>
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-sans">
                       {evt.payment_method}
                     </span>
-                    <span className="text-xs font-medium text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20">
+                    <span className="text-xs font-medium text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20 font-mono">
                       {evt.failure_code}
-                    </span>
-                    <span className="text-[11px] text-slate-500 font-mono ml-auto">
-                      {new Date().toLocaleTimeString()}
                     </span>
                   </div>
 
-                  <p className="text-xs text-slate-300 flex items-center gap-1.5">
+                  <p className="text-xs text-slate-300 flex items-center gap-1.5 font-sans">
                     <span className="text-slate-400 font-medium">Diagnostic:</span>
                     <span>{evt.action_summary}</span>
                   </p>
@@ -299,7 +331,7 @@ export default function AgentLiveStream({ onSelectPayment }) {
                 {/* Middle: ML Score & Policy Check */}
                 <div className="flex items-center gap-4 lg:px-4 border-l border-slate-800/80">
                   <div className="text-center min-w-[70px]">
-                    <span className="text-[10px] text-slate-400 uppercase font-bold block">ML Score</span>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">P(Recovery)</span>
                     <span className={`text-sm font-bold font-mono ${
                       evt.recovery_probability >= 0.75 ? 'text-emerald-400' :
                       evt.recovery_probability >= 0.45 ? 'text-sky-400' : 'text-rose-400'
@@ -310,13 +342,13 @@ export default function AgentLiveStream({ onSelectPayment }) {
 
                   <div className="min-w-[120px]">
                     <span className="text-[10px] text-slate-400 uppercase font-bold block">Policy Guardrail</span>
-                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full inline-flex items-center gap-1 ${
-                      evt.policy_verdict === 'ALLOWED' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' :
-                      evt.policy_verdict === 'MODIFIED' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30' :
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full inline-flex items-center gap-1 font-sans ${
+                      evt.policy_verdict === 'APPROVED' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' :
+                      evt.policy_verdict === 'HUMAN_APPROVAL_REQUIRED' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/30' :
                       'bg-rose-500/10 text-rose-400 border border-rose-500/30'
                     }`}>
-                      {evt.policy_verdict === 'ALLOWED' && <CheckCircle2 className="h-3 w-3" />}
-                      {evt.policy_verdict === 'MODIFIED' && <AlertTriangle className="h-3 w-3" />}
+                      {evt.policy_verdict === 'APPROVED' && <CheckCircle2 className="h-3 w-3" />}
+                      {evt.policy_verdict === 'HUMAN_APPROVAL_REQUIRED' && <AlertTriangle className="h-3 w-3" />}
                       {evt.policy_verdict === 'BLOCKED' && <XCircle className="h-3 w-3" />}
                       {evt.policy_verdict}
                     </span>
@@ -340,7 +372,7 @@ export default function AgentLiveStream({ onSelectPayment }) {
                       onSelectPayment(evt);
                     }}
                     className="p-1.5 rounded-lg bg-slate-800 group-hover:bg-sky-500/20 group-hover:text-sky-300 text-slate-400 transition"
-                    title="View Audit Trail"
+                    title="View Decision Rationale"
                   >
                     <Eye className="h-4 w-4" />
                   </button>

@@ -1,22 +1,23 @@
 {
   "metrics": {
-    "roc_auc": 0.8119,
-    "pr_auc": 0.7495,
-    "brier_score": 0.1749,
-    "expected_calibration_error_ece": 0.0076,
-    "accuracy": 0.7253,
-    "precision": 0.6872,
-    "recall": 0.7141,
-    "f1_score": 0.7004,
+    "roc_auc": 0.8133,
+    "pr_auc": 0.7515,
+    "brier_score": 0.1755,
+    "expected_calibration_error_ece": 0.0283,
+    "optimal_threshold": 0.2,
+    "accuracy": 0.6621,
+    "precision": 0.5744,
+    "recall": 0.9597,
+    "f1_score": 0.7186,
     "test_samples": 7500,
     "confusion_matrix": [
       [
-        3032,
-        1096
+        1730,
+        2398
       ],
       [
-        964,
-        2408
+        136,
+        3236
       ]
     ]
   },
@@ -83,48 +84,45 @@
     }
   ],
   "calibration_data": {
-    "brier_score": 0.1749,
-    "ece": 0.0076,
+    "brier_score": 0.1755,
+    "ece": 0.0283,
+    "optimal_threshold": 0.2,
     "curve": [
       {
-        "predicted_prob": 0.017,
-        "empirical_prob": 0.013
+        "predicted_prob": 0.07,
+        "empirical_prob": 0.011
       },
       {
-        "predicted_prob": 0.15,
-        "empirical_prob": 0.165
+        "predicted_prob": 0.149,
+        "empirical_prob": 0.179
       },
       {
-        "predicted_prob": 0.252,
-        "empirical_prob": 0.244
+        "predicted_prob": 0.251,
+        "empirical_prob": 0.292
       },
       {
-        "predicted_prob": 0.353,
-        "empirical_prob": 0.35
+        "predicted_prob": 0.348,
+        "empirical_prob": 0.401
       },
       {
         "predicted_prob": 0.453,
-        "empirical_prob": 0.465
+        "empirical_prob": 0.462
       },
       {
-        "predicted_prob": 0.55,
-        "empirical_prob": 0.556
+        "predicted_prob": 0.551,
+        "empirical_prob": 0.562
       },
       {
-        "predicted_prob": 0.646,
-        "empirical_prob": 0.663
+        "predicted_prob": 0.648,
+        "empirical_prob": 0.664
       },
       {
-        "predicted_prob": 0.752,
-        "empirical_prob": 0.753
+        "predicted_prob": 0.751,
+        "empirical_prob": 0.723
       },
       {
-        "predicted_prob": 0.844,
-        "empirical_prob": 0.849
-      },
-      {
-        "predicted_prob": 0.907,
-        "empirical_prob": 0.833
+        "predicted_prob": 0.841,
+        "empirical_prob": 0.846
       }
     ]
   },

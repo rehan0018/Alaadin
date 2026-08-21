@@ -1,18 +1,20 @@
 """
-Alaadin - FastAPI Backend Application
+RecoverAI - FastAPI Backend Application
 Exposes REST and WebSocket endpoints for Executive Dashboard, 3-Way Benchmark Experiment,
-Agent Failure Lab ("What if the agent is wrong?"), Decision Rationale, and Model Calibration.
+Agent Failure Lab, Webhook Ingestion with Idempotency, and Batch Simulation.
 """
 
 import os
+import io
+import csv
 import json
 import asyncio
 import random
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Body, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 try:
@@ -29,8 +31,8 @@ except ImportError:
     from .agent_tools import get_tool_registry
 
 app = FastAPI(
-    title="Alaadin - Autonomous Payment Recovery Agent API",
-    description="Backend service powering Alaadin payment recovery, ERV decision optimization, and 3-way benchmarks.",
+    title="RecoverAI - Autonomous Payment Recovery Agent API",
+    description="Backend service powering RecoverAI payment recovery, ERV decision optimization, and 3-way benchmarks.",
     version="2.0.0"
 )
 
@@ -49,6 +51,23 @@ scorer = get_scorer()
 tool_registry = get_tool_registry()
 
 _cached_benchmark = None
+PROCESSED_IDEMPOTENCY_KEYS: Dict[str, Dict[str, Any]] = {}
+
+class WebhookPaymentEvent(BaseModel):
+    event_id: str
+    payment_id: str
+    idempotency_key: Optional[str] = None
+    status: str = "failed"
+    amount: float = 2499.0
+    payment_method: str = "UPI"
+    failure_code: str = "BANK_SERVER_ERROR"
+    customer_id: Optional[str] = "CUST_7821"
+    customer_age_days: int = 180
+    previous_transactions: int = 8
+    previous_success_rate: float = 0.90
+    retry_count: int = 0
+    fraud_risk_score: float = 0.04
+    timestamp: Optional[str] = None
 
 class CustomPaymentRequest(BaseModel):
     payment_id: Optional[str] = None
@@ -62,12 +81,16 @@ class CustomPaymentRequest(BaseModel):
     previous_recovery_rate: float = 0.65
     retry_count: int = 0
     notification_count: int = 0
+    time_since_failure_mins: int = 0
     fraud_risk_score: float = 0.05
     customer_value: float = 0.70
     is_opted_out: int = 0
     is_already_succeeded: int = 0
     subscription_type: str = "ONE_TIME"
     merchant_category: str = "ECOMMERCE"
+
+class BatchSimulateRequest(BaseModel):
+    sample_size: int = 1000
 
 class PolicyUpdateRequest(BaseModel):
     max_retries: Optional[int] = None
@@ -78,25 +101,61 @@ class PolicyUpdateRequest(BaseModel):
     high_ticket_approval_amount: Optional[float] = None
 
 class FailureLabTestRequest(BaseModel):
-    scenario_id: str # "ALREADY_SUCCEEDED", "HIGH_FRAUD", "MAX_RETRIES", "OPTED_OUT", "HIGH_TICKET"
+    scenario_id: str
+
+class ManualOverrideRequest(BaseModel):
+    payment_id: str
+    action: str
+    note: Optional[str] = None
 
 @app.get("/api/health")
 def health_check():
     return {
         "status": "HEALTHY",
-        "service": "Alaadin Autonomous Agent Engine",
-        "ml_model_loaded": scorer.model is not None,
-        "dataset_loaded": len(simulator.df) > 0
+        "service": "RecoverAI Autonomous Agent Engine",
+        "ml_model_loaded": scorer.calibrated_model is not None,
+        "dataset_loaded": len(simulator.df) > 0,
+        "razorpay_api_configured": bool(tool_registry.razorpay_key_id)
+    }
+
+@app.post("/api/webhooks/payment-failed")
+def ingest_payment_failed_webhook(event: WebhookPaymentEvent):
+    """
+    Webhook Ingestion with Idempotency Protection.
+    Guarantees duplicate webhook deliveries never trigger duplicate money movement.
+    """
+    idem_key = event.idempotency_key or event.event_id or event.payment_id
+    if idem_key in PROCESSED_IDEMPOTENCY_KEYS:
+        return {
+            "status": "DUPLICATE_IGNORED",
+            "message": f"Event with idempotency key '{idem_key}' was already processed. Duplicate action suppressed.",
+            "cached_result": PROCESSED_IDEMPOTENCY_KEYS[idem_key]
+        }
+
+    payment_dict = event.model_dump()
+    result = agent.process_failed_payment(payment_dict)
+    PROCESSED_IDEMPOTENCY_KEYS[idem_key] = result
+    return {
+        "status": "PROCESSED",
+        "event_id": event.event_id,
+        "payment_id": event.payment_id,
+        "result": result
     }
 
 @app.get("/api/stats")
 @app.get("/api/benchmark")
 def get_stats(sample_size: int = Query(default=10000, le=50000)):
-    """Returns 3-Way Benchmark Experiment Results (Static vs Rule-Based vs Alaadin)."""
     global _cached_benchmark
     if _cached_benchmark is None or sample_size != 10000:
         _cached_benchmark = simulator.run_3way_benchmark(sample_size=sample_size)
     return _cached_benchmark
+
+@app.post("/api/simulate/batch")
+def run_batch_simulation(req: BatchSimulateRequest):
+    """Executes a genuine batch simulation across requested cohort size."""
+    size = max(10, min(req.sample_size, 50000))
+    res = simulator.run_3way_benchmark(sample_size=size)
+    return res
 
 @app.get("/api/payments")
 def get_payments(
@@ -108,7 +167,6 @@ def get_payments(
 ):
     if simulator.df.empty:
         simulator._load_dataset()
-        
     df = simulator.df.copy()
     if method and method != "ALL":
         df = df[df["payment_method"] == method]
@@ -130,6 +188,39 @@ def get_payments(
         "total_pages": (total_count + page_size - 1) // page_size,
         "data": payments_list
     }
+
+@app.get("/api/payments/export/csv")
+def export_payments_csv(count: int = Query(default=500, le=5000)):
+    """Exports payment audit log as a downloadable CSV."""
+    if simulator.df.empty:
+        simulator._load_dataset()
+    subset = simulator.df.head(count)
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["payment_id", "amount", "method", "failure_code", "recovery_probability", "recommended_action", "policy_verdict", "final_action", "outcome", "recovered_amount"])
+    
+    for _, row in subset.iterrows():
+        res = agent.process_failed_payment(row.to_dict())
+        writer.writerow([
+            res["payment_id"],
+            res["amount"],
+            res["payment_method"],
+            res["failure_code"],
+            res["recovery_probability"],
+            res["proposed_action"],
+            res["policy_verdict"],
+            res["final_action"],
+            "RECOVERED" if res["is_recovered"] else "UNSETTLED",
+            res["recovered_amount"]
+        ])
+        
+    output.seek(0)
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=recoverai_audit_export.csv"}
+    )
 
 @app.get("/api/payments/{payment_id}")
 def get_payment_detail(payment_id: str):
@@ -153,7 +244,6 @@ def get_payment_detail(payment_id: str):
 
 @app.post("/api/agent/decide")
 def test_agent_decision(req: CustomPaymentRequest):
-    """Sandbox endpoint with ERV Optimization and Hard Policy Boundary."""
     p_dict = req.model_dump()
     if not p_dict.get("payment_id"):
         p_dict["payment_id"] = f"PAY_TEST_{random.randint(10000, 99999)}"
@@ -161,11 +251,10 @@ def test_agent_decision(req: CustomPaymentRequest):
 
 @app.post("/api/failure-lab")
 def run_failure_lab_test(req: FailureLabTestRequest):
-    """Agent Failure Lab: Tests extreme scenarios where agent proposed actions must be intercepted by Policy Engine."""
     scenarios = {
         "ALREADY_SUCCEEDED": {
             "title": "Payment Already Succeeded (Race Condition)",
-            "description": "Payment was already settled as SUCCESS via bank webhook, but an async retry event arrives.",
+            "description": "Payment was already settled as SUCCESS via bank webhook, but a delayed async retry arrives.",
             "payment": {
                 "payment_id": "FAIL_LAB_01",
                 "amount": 4999.0,
@@ -258,7 +347,6 @@ def update_policy(req: PolicyUpdateRequest):
 @app.get("/api/model/info")
 @app.get("/api/model/calibration")
 def get_model_info():
-    """Returns ML Metrics, Calibration Curve, Brier Score, and Feature Importances."""
     return {
         "model_type": "Calibrated XGBoost Classifier + ERV Decision Policy",
         "metrics": scorer.metrics,
@@ -270,6 +358,16 @@ def get_model_info():
 @app.get("/api/tools")
 def get_tools():
     return tool_registry.get_definitions()
+
+@app.post("/api/override")
+def manual_override(req: ManualOverrideRequest):
+    return {
+        "status": "OVERRIDDEN",
+        "payment_id": req.payment_id,
+        "override_action": req.action,
+        "timestamp": datetime.utcnow().isoformat(),
+        "message": f"Merchant manual override dispatched: '{req.action}' for {req.payment_id}."
+    }
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket):
@@ -289,7 +387,7 @@ async def websocket_stream(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        print(f"[!] WebSocket error: {e}")
+        print(f"[!] WebSocket stream error: {e}")
 
 # Mount frontend dist static assets
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")

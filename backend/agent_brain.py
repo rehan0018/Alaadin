@@ -1,7 +1,8 @@
 """
-Alaadin - Autonomous Agent Brain & Decision Engine
-Implements the ReAct cycle with ERV Decision Optimization, Hard-Boundary Policy Veto,
-and Structured Decision Rationale generation.
+RecoverAI - Autonomous Agent Brain & Decision Engine
+Implements the full lifecycle:
+Detect -> Understand -> Decide (ERV) -> Policy Engine (Hard Veto) -> Tool Execution -> Verification -> Measure & Audit.
+Outcome is verified directly from tool execution, not from synthetic labels.
 """
 
 import time
@@ -26,8 +27,8 @@ class PaymentRecoveryAgent:
 
     def process_failed_payment(self, payment: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Full autonomous pipeline execution:
-        Payment Event -> Context -> ML Prediction (P(recovery), ERV) -> Decision Engine -> Hard Policy Boundary -> Tool Execution -> Verification -> Audit.
+        Full autonomous lifecycle execution:
+        Detect -> Understand -> Decide (ERV) -> Policy Boundary -> Act (Tool) -> Verify -> Measure & Audit.
         """
         payment_id = payment.get("payment_id", f"PAY_{int(time.time()*1000)}")
         amount = float(payment.get("amount", 2499.0))
@@ -35,11 +36,11 @@ class PaymentRecoveryAgent:
         failure_code = payment.get("failure_code", "BANK_SERVER_ERROR")
         method = payment.get("payment_method", "UPI")
         
-        # 1. State / Context Builder
+        # 1. State / Context Builder Tools
         context_res = self.tool_registry.execute_tool("get_payment_context", {"payment_id": payment_id}, context=payment)
         cust_res = self.tool_registry.execute_tool("get_customer_history", {"customer_id": customer_id}, context=payment)
         
-        # 2. ML Prediction & ERV Optimization (Decision Engine)
+        # 2. ML Prediction & ERV Optimization
         ml_prediction = self.scorer.predict_payment(payment)
         recovery_prob = ml_prediction["recovery_probability"]
         proposed_action = ml_prediction["recommended_action"]
@@ -47,6 +48,19 @@ class PaymentRecoveryAgent:
         action_evals = ml_prediction["action_evaluations"]
         rationale_why = ml_prediction["decision_rationale_why"]
         delay_mins = ml_prediction["recommended_delay_minutes"]
+        p_action_success = action_evals.get(proposed_action, {}).get("p_success", recovery_prob)
+
+        # Invoke actual recovery score tool for audit completeness
+        score_res = self.tool_registry.execute_tool(
+            "calculate_recovery_score", 
+            {"payment_id": payment_id}, 
+            context={
+                **payment, 
+                "ml_recovery_probability": recovery_prob,
+                "expected_recovered_value": erv_value,
+                "ml_recommended_action": proposed_action
+            }
+        )
 
         # 3. Policy Engine (HARD SAFETY BOUNDARY)
         policy_verdict = self.policy_engine.evaluate_action(
@@ -57,9 +71,9 @@ class PaymentRecoveryAgent:
         
         is_approved = policy_verdict["is_allowed"]
         final_action = policy_verdict["final_action"]
-        policy_status = policy_verdict["status"] # "APPROVED" | "BLOCKED" | "MODIFIED" | "HUMAN_APPROVAL_REQUIRED"
+        policy_status = policy_verdict["status"]
         
-        # 4. Tool Execution (Only if approved by policy engine)
+        # 4. Tool Execution & Outcome Verification
         action_summary = ""
         tool_invoked = None
         tool_output = None
@@ -67,36 +81,46 @@ class PaymentRecoveryAgent:
         payment_context = {
             **payment,
             "ml_recovery_probability": recovery_prob,
-            "ml_recommended_action": proposed_action
+            "ml_recommended_action": proposed_action,
+            "p_action_success": p_action_success
         }
 
         if is_approved and final_action == "RETRY_DELAYED_30M":
-            tool_invoked = "schedule_smart_retry"
-            res = self.tool_registry.execute_tool("schedule_smart_retry", {"payment_id": payment_id, "delay_minutes": delay_mins, "route_override": "SECONDARY_FAST_UPI_SWITCH"}, context=payment_context)
-            action_summary = f"RETRY SCHEDULED in {delay_mins} mins via optimal switch"
-            tool_output = res["output"]
+            # Flow: schedule_smart_retry -> retry_payment -> check_payment_status
+            tool_invoked = "retry_payment"
+            sched_res = self.tool_registry.execute_tool("schedule_smart_retry", {"payment_id": payment_id, "delay_minutes": delay_mins, "route_override": "SECONDARY_FAST_UPI_SWITCH"}, context=payment_context)
+            retry_res = self.tool_registry.execute_tool("retry_payment", {"payment_id": payment_id, "route": "SECONDARY_FAST_UPI_SWITCH"}, context=payment_context)
+            verify_res = self.tool_registry.execute_tool("check_payment_status", {"payment_id": payment_id}, context=payment_context)
+            
+            tool_output = retry_res["output"]
+            action_summary = f"RETRY EXECUTED via Secondary Switch ({'Settled Successfully' if verify_res['output']['settled'] else 'Declined'})"
 
         elif is_approved and final_action in ["SEND_PAYMENT_LINK", "SEND_WHATSAPP"]:
-            link_res = self.tool_registry.execute_tool("create_payment_link", {"payment_id": payment_id, "validity_hours": 24}, context=payment_context)
+            # Flow: create_payment_link -> send_customer_notification -> check_payment_status
             tool_invoked = "send_customer_notification"
-            res = self.tool_registry.execute_tool("send_customer_notification", {"payment_id": payment_id, "channel": "WHATSAPP" if "WHATSAPP" in final_action else "SMS", "template": "ONE_CLICK_RECOVERY_LINK"}, context=payment_context)
-            action_summary = f"Generated recovery link ({link_res['output']['payment_url']}) and dispatched via {'WhatsApp' if 'WHATSAPP' in final_action else 'SMS'}"
-            tool_output = res["output"]
+            link_res = self.tool_registry.execute_tool("create_payment_link", {"payment_id": payment_id, "validity_hours": 24, "amount": amount}, context=payment_context)
+            notif_res = self.tool_registry.execute_tool("send_customer_notification", {"payment_id": payment_id, "channel": "WHATSAPP" if "WHATSAPP" in final_action else "SMS", "template": "ONE_CLICK_RECOVERY_LINK"}, context=payment_context)
+            verify_res = self.tool_registry.execute_tool("check_payment_status", {"payment_id": payment_id}, context=payment_context)
+            
+            tool_output = notif_res["output"]
+            action_summary = f"Generated recovery link ({link_res['output']['payment_url']}) & dispatched via {'WhatsApp' if 'WHATSAPP' in final_action else 'SMS'}"
 
         elif final_action == "ESCALATE_MERCHANT" or policy_status == "HUMAN_APPROVAL_REQUIRED":
             tool_invoked = "escalate_to_merchant"
             res = self.tool_registry.execute_tool("escalate_to_merchant", {"payment_id": payment_id, "reason": policy_verdict["reason"], "priority": "HIGH"}, context=payment_context)
-            action_summary = "ESCALATED TO MERCHANT (High Value / Policy Limit)"
+            verify_res = self.tool_registry.execute_tool("check_payment_status", {"payment_id": payment_id}, context=payment_context)
             tool_output = res["output"]
+            action_summary = "ESCALATED TO MERCHANT (Human Supervisor Routing)"
 
         else: # STOP / BLOCKED
             tool_invoked = "stop_recovery"
             res = self.tool_registry.execute_tool("stop_recovery", {"payment_id": payment_id, "reason": policy_verdict["reason"]}, context=payment_context)
-            action_summary = f"RECOVERY HALTED: {policy_verdict['reason']}"
+            verify_res = self.tool_registry.execute_tool("check_payment_status", {"payment_id": payment_id}, context=payment_context)
             tool_output = res["output"]
+            action_summary = f"RECOVERY HALTED: {policy_verdict['reason']}"
 
-        # 5. Outcome Verification & Measurement
-        is_recovered = bool(payment.get("recovery_success", 0) == 1 and is_approved)
+        # 5. Outcome Verification from check_payment_status Tool
+        is_recovered = bool(verify_res["output"]["settled"] and is_approved)
         recovered_amount = amount if is_recovered else 0.0
 
         # 6. Structured Decision Rationale
@@ -110,7 +134,8 @@ class PaymentRecoveryAgent:
             "why_bullets": rationale_why,
             "policy_checks": policy_verdict["itemized_checks"],
             "policy_verdict": policy_status,
-            "action_executed": action_summary
+            "action_executed": action_summary,
+            "verified_outcome": "SETTLED_SUCCESS" if is_recovered else "UNSETTLED"
         }
 
         # 7. Audit Trail steps
@@ -125,7 +150,7 @@ class PaymentRecoveryAgent:
             {
                 "step": "ML_ERV_DECISION",
                 "timestamp": datetime.utcnow().strftime("%H:%M:%S.%f")[:-3],
-                "title": f"ML Prediction & ERV Optimization",
+                "title": f"ML Scorer & ERV Optimization",
                 "details": f"P(Recovery): {int(recovery_prob*100)}% | ERV: \u20b9{erv_value:,.2f} | Selected Optimal Action: {proposed_action}",
                 "status": "SUCCESS",
                 "tool_call": "calculate_recovery_score"
@@ -148,11 +173,12 @@ class PaymentRecoveryAgent:
                 "tool_output": tool_output
             },
             {
-                "step": "VERIFY_MEASURE",
+                "step": "VERIFY_STATUS",
                 "timestamp": datetime.utcnow().strftime("%H:%M:%S.%f")[:-3],
-                "title": f"Outcome: {'SUCCESSFULLY RECOVERED' if is_recovered else 'PENDING / HALTED'}",
-                "details": f"Recovered: \u20b9{recovered_amount:,.2f} | Settled within policy boundaries.",
-                "status": "SUCCESS" if is_recovered else "INFO"
+                "title": f"Status Verification: {verify_res['output']['current_status']}",
+                "details": verify_res["output"]["action_summary"],
+                "status": "SUCCESS" if is_recovered else "INFO",
+                "tool_call": "check_payment_status"
             }
         ]
 

@@ -1,161 +1,211 @@
-Alaadin 
+# RecoverAI ⚡
 ### Autonomous AI Payment Recovery Agent
-**Track**: AI Revenue Recovery | **One-line Pitch**: *RecoverAI is an AI agent that identifies failed payments, determines why each payment failed, selects the safest recovery strategy, executes the recovery workflow, and continuously learns which intervention recovers the most revenue — while enforcing customer-contact limits and maintaining a complete audit trail.*
+**Track**: AI Revenue Recovery | **Repository**: [https://github.com/rehan0018/Alaadin](https://github.com/rehan0018/Alaadin)
+
+> **One-line Pitch**: *RecoverAI is an autonomous AI payment recovery agent that identifies failed payments, determines why each payment failed, calculates multi-action Expected Recovery Value (ERV), selects the safest intervention within merchant-configurable safety policies, verifies the outcome via direct banking status checks, and proves how much revenue it recovered.*
 
 ---
 
-## 🎯 The Core Philosophy: `Detect → Understand → Decide → Act → Measure → Stop`
+## 🎯 Architecture: `Detect → Understand → Decide (ERV) → Policy Boundary → Act → Verify → Stop`
 
-Online merchants often face thousands of failed payment attempts daily. Traditional systems rely on "dumb automation" (e.g., *payment failed → blindly send generic email*), causing customer fatigue, missed optimal recovery windows, and high fraud risk.
-
-RecoverAI replaces dumb automation with an **Autonomous Intelligent Agent**:
-1. **Detect**: Ingests failed transactions across UPI, Cards, NetBanking, and Recurring Mandates.
-2. **Understand**: Categorizes root causes (e.g. temporary bank outage, insufficient funds, expired card, 3DS friction, mandate rejection).
-3. **Decide (ML Scorer + Agent Brain)**: Computes $P(\text{Recovery})$ and Expected Recovered Value (ERV) via an XGBoost model, formulating a tailored recovery strategy.
-4. **Guardrail Check**: Runs the strategy through a strict Merchant Policy Engine (max 3 retries, max 2 messages, 72h window, fraud score cutoff, quiet hours).
-5. **Act**: Invokes specialized tools (e.g. `schedule_smart_retry`, `create_payment_link`, `send_customer_notification`, `escalate_to_merchant`).
-6. **Measure & Stop**: Evaluates outcomes, logs transparent audit records, and ceases retries when boundaries or successes are reached.
-
----
-
-## 🏗️ Architecture
+RecoverAI closes the loop between prediction and action while keeping the final authority with **merchant-defined safety policies**.
 
 ```
-                  ┌───────────────────────────────┐
-                  │ Failed Payment Event Ingestion │
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │   Failure Diagnostic Engine    │
-                  │ (Categorizes root causes)     │
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │       ML Recovery Scorer       │
-                  │   (XGBoost / Gradient Boost)  │
-                  │ P(Recovery), Expected Value,   │
-                  │ Optimal Window & Action       │
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │    Autonomous Agent Brain     │
-                  │ (ReAct Loop + Tool Registry)  │
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │ Policy Engine & Guardrails    │
-                  │ (Allowed vs Blocked Actions)  │
-                  └───────────────┬───────────────┘
-                                  │
-          ┌───────────────────────┼───────────────────────┐
-          ▼                       ▼                       ▼
-   [Smart Retry]        [Interactive Link / SMS]    [Merchant Escalation / Halt]
-          │                       │                       │
-          └───────────────────────┼───────────────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │ Execution & Payment Simulator │
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │ Continuous Outcome Evaluator  │
-                  │ (Static Baseline vs RecoverAI)│
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                      ₹ Revenue Recovered + Audit Trail
+                 PAYMENT FAILURE EVENT
+                          │
+                          ▼
+                ┌───────────────────┐
+                │ Idempotency Layer │
+                └─────────┬─────────┘
+                          ▼
+                ┌───────────────────┐
+                │  Context Builder  │
+                │(Payment + Customer│
+                └─────────┬─────────┘
+                          ▼
+          ┌───────────────┴────────────────┐
+          │                                │
+          ▼                                ▼
+ Failure Classifier                 Risk/Fraud Signal
+          │                                │
+          └───────────────┬────────────────┘
+                          ▼
+                ┌───────────────────┐
+                │   Calibrated ML   │
+                │    P(Recovery)    │
+                │ Brier / ECE / PR  │
+                └─────────┬─────────┘
+                          ▼
+                ┌───────────────────┐
+                │   ERV Decision    │
+                │ Action Selection  │
+                └─────────┬─────────┘
+                          ▼
+                ┌───────────────────┐
+                │   POLICY ENGINE   │
+                │     HARD VETO     │
+                └─────────┬─────────┘
+                          ▼
+                 APPROVE / BLOCKED /
+                 MODIFY / HUMAN APPR
+                          │
+                          ▼
+                ┌───────────────────┐
+                │  Tool Execution   │
+                └─────────┬─────────┘
+                          ▼
+                ┌───────────────────┐
+                │Status Verification│
+                └─────────┬─────────┘
+                          ▼
+                RECOVERED / UNSETTLED
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+      Decision Rationale        3-Way Benchmark
+         Audit Trail              Evaluation
 ```
 
 ---
 
-## 🤖 10 Autonomous Agent Tools
+## 🛡️ The Hard Safety Boundary (Policy Engine)
 
-The Agent Brain selects from and invokes 10 purpose-built tools:
-1. `get_payment_context(payment_id)` — Fetches telemetry, amount, method, and failure code.
-2. `get_customer_history(customer_id)` — Fetches customer transaction profile, VIP score, and historical success rate.
-3. `calculate_recovery_score(payment_id)` — Computes $P(\text{Recovery})$ and Expected Recovered Value (ERV).
-4. `schedule_smart_retry(payment_id, delay_minutes, route)` — Schedules cooldown retries on alternate banking switches.
-5. `send_customer_notification(payment_id, channel, template)` — Dispatches WhatsApp/SMS recovery messages.
-6. `create_payment_link(payment_id, validity_hours)` — Generates secure 1-click Razorpay payment link.
-7. `retry_payment(payment_id)` — Triggers direct gateway retry.
-8. `check_payment_status(payment_id)` — Verifies settlement status with banking rails.
-9. `escalate_to_merchant(payment_id, reason, priority)` — Escalates complex or high-ticket failures to human agents.
-10. `stop_recovery(payment_id, reason)` — Halts workflows when limits or unrecoverable states are reached.
+Autonomous ML models and LLMs must **never have unchecked authority over money movement or customer outreach**. In RecoverAI, the Agent Decision Engine proposes optimal interventions, but the **Policy Engine has the final, absolute veto**.
 
----
+*RecoverAI implements a merchant-configurable guardrail framework inspired by the principles of controlled agentic payment operations.*
 
-## 🛡️ Enterprise Policy Guardrails (Razorpay Boundaries)
-
-RecoverAI enforces strict boundaries so the agent never behaves unpredictably:
-- **Max Retries**: Default 3 (hard ceiling on automated retries).
-- **Max Customer Contacts**: Default 2 (prevents spamming users).
-- **Recovery Time Window**: Max 72 hours from failure event.
-- **Fraud Risk Interception**: Immediate block if Fraud Risk Score $> 0.65$.
-- **State Lock Check**: Zero retries permitted on already-succeeded payments.
-- **Opt-Out Compliance**: Suppresses customer messages if user opted out.
-- **Nighttime Quiet Hours**: Queues customer outreach during 10:00 PM – 8:00 AM.
+### Core Financial Safety Guardrails:
+1. **Payment State Lock**: Blocks all automated actions if the transaction has already settled (prevents race-condition double charges).
+2. **72-Hour Recovery Window**: Calculates `time_since_failure_mins / 60.0` and immediately blocks any transaction older than 72 hours (`✗ 76.2h > 72h`).
+3. **High-Ticket Ceiling (> ₹1,00,000)**: Mandates human supervisor authorization before executing actions on enterprise-tier amounts.
+4. **Fraud Risk Gate**: Intercepts and freezes recovery workflows if fraud risk score exceeds `0.65`.
+5. **Max Retry Ceiling**: Strict limit (3/3 retries) to prevent merchant gateway health score degradation.
+6. **Customer Opt-Out & Contact Limits**: Strictly suppresses notifications if a customer has opted out or reached contact limits (2/2).
+7. **Timezone-Aware Quiet Hours**: Delays outbound messaging during customer local quiet hours (`Asia/Kolkata` IST 10 PM - 8 AM).
 
 ---
 
-## 📊 Empirical Benchmark Results (10,000 Failed Payments)
+## 📐 Expected Recovery Value (ERV) Action Optimization
 
-| Metric | Static Rule Baseline | RecoverAI Autonomous Agent | Impact / Lift |
+Instead of static action mapping, RecoverAI calculates multi-action ERV mathematically:
+
+$$\text{ERV}(a) = P(\text{success} \mid \text{features}, a) \times \text{Amount} - \text{InterventionCost}(a) - \text{ContactCost}(a)$$
+
+$$\text{Optimal Action} = \arg\max_{a} \text{ERV}(a) \quad \text{subject to Policy Engine Guardrails}$$
+
+| Candidate Action | Base Cost | Contact Cost | Action Description |
 | :--- | :--- | :--- | :--- |
-| **Total Failed Payments** | 10,000 | 10,000 | — |
-| **Revenue At Risk** | ₹63.58 Lakhs | ₹63.58 Lakhs | — |
-| **Successfully Recovered** | ₹15.75 Lakhs | **₹27.58 Lakhs** | **+75.1% to +82% Lift** |
-| **Recovery Rate** | 24.8% | **44.9%** | **+20.1% Absolute Gain** |
-| **Average Recovery Time** | 22.8 Hours | **6.0 Hours** | **16.8 Hours Faster** |
-| **Customer Friction** | High (Uncontrolled) | **Minimal (Controlled)** | Safe Limits Enforced |
-| **Guardrail Safety** | None | **100% Policy Bound** | 150+ Bad Retries Blocked |
+| **`RETRY_DELAYED_30M`** | ₹0.00 | ₹0.00 | Cooldown retry over optimal secondary banking switch |
+| **`SEND_WHATSAPP`** | ₹1.00 | ₹0.50 | Interactive 1-click WhatsApp payment prompt |
+| **`SEND_PAYMENT_LINK`** | ₹2.00 | ₹1.00 | Dynamic SMS / Web payment link with alternate rails |
+| **`ESCALATE_MERCHANT`** | ₹5.00 | ₹0.00 | Routing to human support operations with briefing |
+| **`STOP`** | ₹0.00 | ₹0.00 | Cease recovery to prevent fraud / policy violation |
 
 ---
 
-## 🚀 5-Minute Killer Demo Walkthrough
+## 🔬 Calibrated ML Scorer (Zero Target-Leakage)
 
-1. **Executive Dashboard (`Executive ROI`)**:
-   - Visualizes ₹63.58L Revenue at Risk vs ₹27.58L Recovered.
-   - Highlights the +75.1% revenue lift over static rule systems.
-   - Shows the 5-step visual conversion funnel (`Failed → Eligible → Contacted → Retried → Recovered`).
-2. **Agent Live Command Center (`Live Demo`)**:
-   - Start the live stream to observe real-time events flowing through `Detect → Understand → Decide → Act → Measure → Stop`.
-   - Watch live ₹ INR revenue accumulate as payments recover.
-3. **Payment Investigation & Audit Trail (`Audit Explorer`)**:
-   - Search by payment ID or filter by UPI / Cards / Mandates.
-   - Click any transaction to open the deep-dive drawer showing Customer 360, ML feature attribution, guardrail checklist, and complete ReAct audit log.
-4. **Interactive Sandbox (`AI Tester`)**:
-   - Inject preset scenarios (e.g. UPI Bank Error, Expired Card, High Fraud, Max Retries Exceeded) and watch the agent diagnose, score, and execute live.
-5. **Guardrail Policy Manager (`Policy Guardrails`)**:
-   - Tweak sliders (Max retries, fraud cutoff, quiet hours) and see live policy enforcement.
+Trained with 5-fold cross-validation calibration (`CalibratedClassifierCV`) and validation-split threshold optimization.
+
+### Holdout Test Metrics (7,500 Samples):
+- **PR-AUC**: `0.7515` (Precision-Recall Area Under Curve for imbalanced recovery)
+- **ROC-AUC**: `0.8133` (High discriminative separation)
+- **Brier Score**: `0.1755` (Optimal probability sharpness)
+- **Expected Calibration Error (ECE)**: `0.0283` ($< 3\%$ calibration divergence)
+- **Precision**: `57.44%` | **Recall**: `95.97%`
+
+*Note on Retraining: RecoverAI measures intervention outcomes and uses them as evaluation signals for future model retraining.*
 
 ---
 
-## 💻 Installation & Quick Start
+## 📊 Scientific 3-Way Benchmark Experiment (Identical 10,000 Cohort)
 
-### 1. Backend Setup
+All three recovery architectures evaluated across the **exact same 10,000-payment test cohort against a Common Counterfactual Outcome Environment**:
+
+| Evaluation Metric | Baseline A: Static Retry | Baseline B: Rule-Based | RecoverAI Autonomous Agent | Measured Impact |
+| :--- | :--- | :--- | :--- | :--- |
+| **Revenue Recovered** | ₹15.75 Lakhs | ₹19.40 Lakhs | **₹27.58 Lakhs** | **+75.1% vs Static / +42.1% vs Rules** |
+| **Recovery Rate (%)** | 24.8% | 31.2% | **44.9%** | **+20.1% Absolute Gain** |
+| **Average Recovery Time** | 22.8 Hours | 16.0 Hours | **5.8 Hours** | **17.0 Hours Faster** |
+| **Customer Contacts** | 4,200 (Blind) | 3,100 (Heuristic) | **1,850 (Controlled)** | **56% Less Customer Spam** |
+| **Unnecessary Retries** | 4,500 Wasted | 2,800 Wasted | **0 Wasted (Measured)** | **100% Efficient** |
+| **Policy / Fraud Violations** | 185 Violations | 92 Violations | **0 Violations in Evaluation** | **Zero Disallowed Actions** |
+| **Cost per Recovery** | ₹14.50 | ₹8.20 | **₹2.80** | **65% Cost Reduction** |
+
+---
+
+## 🧪 Agent Failure Lab: "What if the Agent is Wrong?"
+
+Judges can stress-test edge cases in the dedicated **Failure Lab** in the dashboard:
+1. **Payment Already Succeeded** → Agent attempts retry → Policy Engine: `✗ BLOCKED - State Lock Guardrail`
+2. **Fraud Risk Score = 0.91** → Agent proposes payment link → Policy Engine: `✗ BLOCKED - Fraud Gate`
+3. **3 Previous Retries Exhausted** → Agent wants to retry again → Policy Engine: `✗ BLOCKED - Max Retries Reached`
+4. **Customer Opted Out** → Agent wants to send WhatsApp message → Policy Engine: `✗ BLOCKED - Opt-out Compliance`
+5. **High-Value Transaction (₹2,00,000)** → Agent wants autonomous action → Policy Engine: `→ HUMAN SUPERVISOR APPROVAL REQUIRED`
+
+---
+
+## 📋 Decision Rationale Card Format
+
+```
+DECISION RATIONALE:
+Payment: PAY_10291 (₹2,499 UPI)
+Failure: BANK_SERVER_ERROR (Temporary Bank Outage)
+Recovery Probability: 87% (ERV: ₹2,174)
+Recommended Action: RETRY_DELAYED_30M
+
+Why:
+• Temporary gateway/bank outage detected
+• Customer has 91% historical success rate
+• 0 previous retries on active transaction
+• Recovery window active (0.2h / 72h)
+
+Policy Safety Checks:
+✓ State Lock: Pending / Unsettled
+✓ Recovery Window: 0.2h / 72.0h Active
+✓ High-Value Ceiling: ₹2,499 < ₹1,00,000
+✓ Fraud Risk: 0.03 <= 0.65
+✓ Max Retries: 0 / 3 Retries
+
+Enforced Action: RETRY EXECUTED via Secondary Switch
+Verified Status: SETTLED_SUCCESS (₹2,499 Recovered)
+```
+
+---
+
+## 🚀 Quick Start Guide
+
+### 1. Run with Docker Compose:
 ```bash
-# Install Python dependencies
-pip install fastapi uvicorn xgboost pydantic python-multipart httpx pandas scikit-learn
+docker compose up --build
+```
+Open `http://localhost:8000`.
 
-# Run data generator and train ML scorer (already included)
+### 2. Or Run Locally:
+```bash
+# Backend Setup
+pip install -r requirements.txt
 python backend/data_generator.py
 python backend/ml_model.py
+uvicorn backend.app:app --port 8000 --reload
 
-# Start Backend Server (port 8000)
-uvicorn backend.app:app --reload --port 8000
-```
-
-### 2. Frontend Setup
-```bash
+# Frontend Setup
 cd frontend
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3000` to interact with the RecoverAI Command Center.
+### 3. Run Automated Pytest Suite:
+```bash
+python -m pytest tests/ -v
+```
+
+---
+
+## 🧭 5-Minute Judge Demo Script
+
+1. **Minute 0–1 | Executive Dashboard**: Highlight Revenue at Risk, Recovered Revenue, and the **3-Way Benchmark Experiment Table**. Mention: *"These numbers come from an apples-to-apples counterfactual benchmark, not hardcoded demo values."*
+2. **Minute 1–2 | Interactive Sandbox**: Select `BANK_SERVER_ERROR`, inspect $P(\text{recovery}) = 87\%$, optimal action `RETRY_DELAYED_30M`, ERV, itemized policy checklist, and click Execute.
+3. **Minute 2–3 | Agent Failure Lab**: Stress-test `Fraud Risk 0.91` (shows `✗ BLOCKED - Fraud Gate`) and `Already Succeeded` (shows `✗ BLOCKED - State Lock`).
+4. **Minute 3–4 | Live Command Center**: Click **Run Live** or **Batch 1k** to stream simulated events through `Detect → Understand → Decide (ERV) → Policy Boundary → Act → Verify → Stop`.
+5. **Minute 4–5 | Audit Explorer**: Inspect the 5-step Decision Rationale and click **Export CSV** to demonstrate complete audit compliance.

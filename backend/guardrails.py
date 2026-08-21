@@ -1,12 +1,13 @@
 """
-Alaadin - Merchant-Configurable Financial Safety Guardrails (Hard Policy Engine)
+RecoverAI - Merchant-Configurable Financial Safety Guardrails (Hard Policy Engine)
 Enforces non-negotiable boundaries over autonomous agent actions.
 Inspired by the principles of controlled agentic payment operations.
-The LLM / Agent can reason and select actions, but the Policy Engine has the final, absolute veto.
+The Decision Engine proposes actions, but the Policy Engine has the final, absolute veto.
 """
 
 from typing import Dict, Any, Tuple, List
-from datetime import datetime
+from datetime import datetime, timezone
+import zoneinfo
 
 class MerchantPolicyConfig:
     def __init__(
@@ -18,6 +19,7 @@ class MerchantPolicyConfig:
         enforce_quiet_hours: bool = True,
         quiet_hours_start: int = 22, # 10 PM
         quiet_hours_end: int = 8,    # 8 AM
+        default_timezone: str = "Asia/Kolkata",
         high_ticket_approval_amount: float = 100000.0, # ₹1,00,000
         allow_automated_discounts: bool = True
     ):
@@ -28,6 +30,7 @@ class MerchantPolicyConfig:
         self.enforce_quiet_hours = enforce_quiet_hours
         self.quiet_hours_start = quiet_hours_start
         self.quiet_hours_end = quiet_hours_end
+        self.default_timezone = default_timezone
         self.high_ticket_approval_amount = high_ticket_approval_amount
         self.allow_automated_discounts = allow_automated_discounts
 
@@ -40,6 +43,7 @@ class MerchantPolicyConfig:
             "enforce_quiet_hours": self.enforce_quiet_hours,
             "quiet_hours_start": self.quiet_hours_start,
             "quiet_hours_end": self.quiet_hours_end,
+            "default_timezone": self.default_timezone,
             "high_ticket_approval_amount": self.high_ticket_approval_amount,
             "allow_automated_discounts": self.allow_automated_discounts
         }
@@ -52,6 +56,17 @@ class PolicyEngine:
         for k, v in new_config_dict.items():
             if hasattr(self.config, k):
                 setattr(self.config, k, v)
+
+    def _get_local_hour(self, payment: Dict[str, Any], current_time: datetime = None) -> Tuple[int, str]:
+        tz_name = payment.get("timezone") or self.config.default_timezone
+        try:
+            tz = zoneinfo.ZoneInfo(tz_name)
+            now = current_time or datetime.now(timezone.utc)
+            local_time = now.astimezone(tz)
+            return local_time.hour, tz_name
+        except Exception:
+            # Fallback to payment record hour or IST
+            return int(payment.get("hour", 14)), tz_name
 
     def evaluate_action(
         self,
@@ -77,13 +92,18 @@ class PolicyEngine:
         fraud_score = float(payment.get("fraud_risk_score", 0.0))
         amount = float(payment.get("amount", 0.0))
         is_opted_out = bool(payment.get("is_opted_out", 0) == 1 or payment.get("is_opted_out", False))
-        is_already_succeeded = bool(payment.get("is_already_succeeded", 0) == 1 or payment.get("status") == "SUCCESS")
+        is_already_succeeded = bool(payment.get("is_already_succeeded", 0) == 1 or payment.get("status") == "SUCCESS" or payment.get("is_settled", False))
         
-        curr_hour = current_time.hour if current_time else int(payment.get("hour", 14))
-        is_quiet = self.config.enforce_quiet_hours and (curr_hour >= self.config.quiet_hours_start or curr_hour < self.config.quiet_hours_end)
+        # 1. Recovery Window Calculation from time_since_failure_mins
+        time_since_failure_mins = float(payment.get("time_since_failure_mins", 0.0))
+        elapsed_hours = time_since_failure_mins / 60.0
+        
+        # 2. Timezone-aware quiet hours
+        local_hour, tz_name = self._get_local_hour(payment, current_time)
+        is_quiet = self.config.enforce_quiet_hours and (local_hour >= self.config.quiet_hours_start or local_hour < self.config.quiet_hours_end)
 
         # -------------------------------------------------------------
-        # 1. State Lock Check: Succeeded Transactions
+        # CHECK 1: State Lock (Already Succeeded Payment)
         # -------------------------------------------------------------
         if is_already_succeeded:
             itemized_checks.append({
@@ -107,11 +127,35 @@ class PolicyEngine:
         })
 
         # -------------------------------------------------------------
-        # 2. High-Ticket Hard Boundary (> ₹1,00,000)
+        # CHECK 2: Recovery Time Window (<= 72 Hours)
+        # -------------------------------------------------------------
+        if elapsed_hours > self.config.max_recovery_window_hours:
+            itemized_checks.append({
+                "rule": "Recovery Window",
+                "status": "FAIL",
+                "display": f"{elapsed_hours:.1f}h > {self.config.max_recovery_window_hours}h Exceeded",
+                "passed": False
+            })
+            return {
+                "is_allowed": False,
+                "status": "BLOCKED",
+                "final_action": "STOP",
+                "itemized_checks": itemized_checks,
+                "reason": f"Recovery time window exceeded ({elapsed_hours:.1f}h > {self.config.max_recovery_window_hours}h). Automated recovery halted."
+            }
+        itemized_checks.append({
+            "rule": "Recovery Window",
+            "status": "PASS",
+            "display": f"{elapsed_hours:.1f}h / {self.config.max_recovery_window_hours}h Active",
+            "passed": True
+        })
+
+        # -------------------------------------------------------------
+        # CHECK 3: High-Ticket Hard Boundary (> ₹1,00,000)
         # -------------------------------------------------------------
         if amount >= self.config.high_ticket_approval_amount and proposed_action not in ["STOP", "ESCALATE_MERCHANT"]:
             itemized_checks.append({
-                "rule": "High-Value Transaction Ceiling",
+                "rule": "High-Value Ceiling",
                 "status": "MANUAL",
                 "display": f"\u20b9{amount:,.0f} >= \u20b9{self.config.high_ticket_approval_amount:,.0f}",
                 "passed": False
@@ -131,7 +175,7 @@ class PolicyEngine:
         })
 
         # -------------------------------------------------------------
-        # 3. Fraud Risk Score Gate
+        # CHECK 4: Fraud Risk Gate
         # -------------------------------------------------------------
         if fraud_score > self.config.fraud_risk_threshold:
             itemized_checks.append({
@@ -155,7 +199,7 @@ class PolicyEngine:
         })
 
         # -------------------------------------------------------------
-        # 4. Retry Limits
+        # CHECK 5: Retry Limits
         # -------------------------------------------------------------
         if "RETRY" in proposed_action:
             if retry_count >= self.config.max_retries:
@@ -181,7 +225,7 @@ class PolicyEngine:
             })
 
         # -------------------------------------------------------------
-        # 5. Customer Notification & Opt-Out Checks
+        # CHECK 6: Customer Outreach Limits, Opt-Out, & Quiet Hours
         # -------------------------------------------------------------
         if proposed_action in ["SEND_PAYMENT_LINK", "SEND_WHATSAPP"]:
             if is_opted_out:
@@ -228,29 +272,21 @@ class PolicyEngine:
                 "passed": True
             })
 
-            # Quiet Hours
+            # Timezone Quiet Hours
             if is_quiet:
                 itemized_checks.append({
-                    "rule": "Quiet Hours (10PM-8AM)",
+                    "rule": f"Quiet Hours ({tz_name})",
                     "status": "PASS_DELAYED",
                     "display": "Queued for 8:00 AM",
                     "passed": True
                 })
             else:
                 itemized_checks.append({
-                    "rule": "Quiet Hours",
+                    "rule": f"Quiet Hours ({tz_name})",
                     "status": "PASS",
                     "display": "Active Hours Allowed",
                     "passed": True
                 })
-
-        # Recovery Window Check
-        itemized_checks.append({
-            "rule": "Recovery Window",
-            "status": "PASS",
-            "display": f"< {self.config.max_recovery_window_hours}h Active",
-            "passed": True
-        })
 
         return {
             "is_allowed": True,
