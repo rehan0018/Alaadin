@@ -193,31 +193,34 @@ def get_payments(
     }
 
 @app.get("/api/payments/export/csv")
-def export_payments_csv(count: int = Query(default=300, le=1000)):
+def export_payments_csv(count: int = Query(default=500, le=5000)):
     """Exports payment audit log as a downloadable CSV."""
     if simulator.df.empty:
         simulator._load_dataset()
-    subset = simulator.df.head(count)
+    subset = simulator.df.head(count).copy()
+    batch_probs = scorer.predict_batch_probabilities(subset)
     
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["payment_id", "amount", "method", "failure_code", "recovery_probability", "recommended_action", "policy_verdict", "final_action", "outcome", "recovered_amount"])
     
-    for _, row in subset.iterrows():
+    for idx_pos, (_, row) in enumerate(subset.iterrows()):
         p_dict = row.to_dict()
-        dec = agent.decide(p_dict)
-        pol = policy_engine.evaluate_action(p_dict, dec["proposed_action"])
+        prob = float(batch_probs[idx_pos])
+        best_action, _, _ = scorer.evaluate_candidate_actions(p_dict, prob)
+        pol = policy_engine.evaluate_action(p_dict, best_action)
+        is_rec = pol["is_allowed"] and prob >= 0.5
         writer.writerow([
             p_dict.get("payment_id"),
             p_dict.get("amount"),
             p_dict.get("payment_method"),
             p_dict.get("failure_code"),
-            dec["recovery_probability"],
-            dec["proposed_action"],
+            round(prob, 2),
+            best_action,
             pol["status"],
             pol["final_action"],
-            "RECOVERED" if pol["is_allowed"] and dec["recovery_probability"] >= 0.5 else "UNSETTLED",
-            p_dict.get("amount") if pol["is_allowed"] and dec["recovery_probability"] >= 0.5 else 0.0
+            "RECOVERED" if is_rec else "UNSETTLED",
+            p_dict.get("amount") if is_rec else 0.0
         ])
         
     output.seek(0)

@@ -123,6 +123,9 @@ class PaymentSimulator:
         total_failed_count = len(subset)
         revenue_at_risk = float(subset["amount"].sum())
 
+        # Vectorized batch inference for instant evaluation
+        batch_probs = self.agent.scorer.predict_batch_probabilities(subset)
+
         # Baseline A Counters
         static_rec_cnt, static_rec_rev, static_times = 0, 0.0, []
         static_contacts, static_retries, static_waste, static_violations, static_cost = 0, 0, 0, 0, 0.0
@@ -146,7 +149,7 @@ class PaymentSimulator:
 
         category_breakdown = {}
 
-        for idx, row in subset.iterrows():
+        for idx_pos, (idx, row) in enumerate(subset.iterrows()):
             payment = row.to_dict()
             amt = float(payment["amount"])
             code = str(payment["failure_code"])
@@ -218,8 +221,8 @@ class PaymentSimulator:
             # ---------------------------------------------------------
             # 4. EVALUATE ALAADIN AUTONOMOUS AGENT (Pure Decision + Common Evaluation)
             # ---------------------------------------------------------
-            decision = self.agent.decide(payment)
-            proposed_action = decision["proposed_action"]
+            prob = float(batch_probs[idx_pos])
+            proposed_action, _, _ = self.agent.scorer.evaluate_candidate_actions(payment, prob)
             
             pol_eval = self.policy_engine.evaluate_action(payment, proposed_action)
             chosen_action = pol_eval["final_action"]

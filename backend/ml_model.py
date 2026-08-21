@@ -416,6 +416,15 @@ class RecoveryScorerModel:
             "recommended_delay_minutes": 30 if "30M" in best_action else (15 if "WHATSAPP" in best_action else 0)
         }
 
+    def predict_batch_probabilities(self, df: pd.DataFrame) -> np.ndarray:
+        """Vectorized batch inference for instant benchmark evaluations."""
+        X = self.prepare_features(df, is_training=False)
+        probs = self.calibrated_model.predict_proba(X)[:, 1]
+        if "fraud_risk_score" in df.columns:
+            fraud_mask = df["fraud_risk_score"] > 0.65
+            probs[fraud_mask] = np.minimum(probs[fraud_mask], 0.03)
+        return np.clip(probs, 0.01, 0.98)
+
 # Global singleton
 _scorer_instance = None
 
