@@ -80,8 +80,17 @@ export default function Navbar({ activeTab, setActiveTab }) {
             })}
           </nav>
 
-          {/* GitHub link */}
-          <div className="flex items-center space-x-3">
+          {/* Action Links */}
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={onStartGuidedDemo}
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-400 via-rose-400 to-sky-400 hover:from-amber-300 hover:to-sky-300 text-slate-950 text-xs font-bold shadow-lg shadow-amber-500/20 transition active:scale-95 whitespace-nowrap"
+              title="Launch 5-Minute Auto-Playing Video Presentation"
+            >
+              <Tv className="h-3.5 w-3.5 fill-current" />
+              <span>Video Demo (5m)</span>
+            </button>
+
             <a
               href="https://github.com/rehan0018/Alaadin"
               target="_blank"

@@ -7,11 +7,13 @@ import PaymentInvestigation from './components/PaymentInvestigation';
 import InteractiveSandbox from './components/InteractiveSandbox';
 import GuardrailManager from './components/GuardrailManager';
 import ModelDiagnostics from './components/ModelDiagnostics';
+import GuidedVideoDemo from './components/GuidedVideoDemo';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('executive');
   const [stats, setStats] = useState(null);
   const [selectedPayment, setSelectedPayment] = useState(null);
+  const [showVideoDemo, setShowVideoDemo] = useState(false);
 
   const fetchStats = async () => {
     try {
@@ -34,11 +36,20 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col relative">
       <Navbar 
         activeTab={activeTab} 
         setActiveTab={setActiveTab} 
+        onStartGuidedDemo={() => setShowVideoDemo(true)}
       />
+
+      {showVideoDemo && (
+        <GuidedVideoDemo 
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          onClose={() => setShowVideoDemo(false)}
+        />
+      )}
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6">
         {activeTab === 'executive' && (
