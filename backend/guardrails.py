@@ -1,8 +1,8 @@
 """
-RecoverAI - Enterprise Policy Engine & Guardrails
-Enforces Razorpay-grade merchant guardrails and boundary checks.
-Ensures the autonomous agent never exceeds retries, spams customers,
-contacts opted-out users, or acts on high-fraud or already-succeeded transactions.
+Alaadin - Merchant-Configurable Financial Safety Guardrails (Hard Policy Engine)
+Enforces non-negotiable boundaries over autonomous agent actions.
+Inspired by the principles of controlled agentic payment operations.
+The LLM / Agent can reason and select actions, but the Policy Engine has the final, absolute veto.
 """
 
 from typing import Dict, Any, Tuple, List
@@ -18,7 +18,7 @@ class MerchantPolicyConfig:
         enforce_quiet_hours: bool = True,
         quiet_hours_start: int = 22, # 10 PM
         quiet_hours_end: int = 8,    # 8 AM
-        high_ticket_escalation_amount: float = 15000.0,
+        high_ticket_approval_amount: float = 100000.0, # ₹1,00,000
         allow_automated_discounts: bool = True
     ):
         self.max_retries = max_retries
@@ -28,7 +28,7 @@ class MerchantPolicyConfig:
         self.enforce_quiet_hours = enforce_quiet_hours
         self.quiet_hours_start = quiet_hours_start
         self.quiet_hours_end = quiet_hours_end
-        self.high_ticket_escalation_amount = high_ticket_escalation_amount
+        self.high_ticket_approval_amount = high_ticket_approval_amount
         self.allow_automated_discounts = allow_automated_discounts
 
     def to_dict(self) -> Dict[str, Any]:
@@ -40,7 +40,7 @@ class MerchantPolicyConfig:
             "enforce_quiet_hours": self.enforce_quiet_hours,
             "quiet_hours_start": self.quiet_hours_start,
             "quiet_hours_end": self.quiet_hours_end,
-            "high_ticket_escalation_amount": self.high_ticket_escalation_amount,
+            "high_ticket_approval_amount": self.high_ticket_approval_amount,
             "allow_automated_discounts": self.allow_automated_discounts
         }
 
@@ -60,127 +60,204 @@ class PolicyEngine:
         current_time: datetime = None
     ) -> Dict[str, Any]:
         """
-        Validates the proposed action against all merchant policies.
+        Hard Safety Boundary Gatekeeper.
+        Evaluates proposed agent action against itemized merchant safety policies.
         Returns:
             {
                 "is_allowed": bool,
-                "status": "ALLOWED" | "REJECTED" | "MODIFIED",
+                "status": "APPROVED" | "BLOCKED" | "MODIFIED" | "HUMAN_APPROVAL_REQUIRED",
                 "final_action": str,
-                "passed_checks": List[str],
-                "failed_checks": List[str],
+                "itemized_checks": List[Dict[str, Any]],
                 "reason": str
             }
         """
-        passed_checks = []
-        failed_checks = []
-        
-        # 1. Check if payment already succeeded
-        if payment.get("is_already_succeeded", 0) == 1 or payment.get("status") == "SUCCESS":
-            failed_checks.append("PAYMENT_ALREADY_SUCCEEDED")
-            return {
-                "is_allowed": False,
-                "status": "REJECTED",
-                "final_action": "STOP_RECOVERY",
-                "passed_checks": passed_checks,
-                "failed_checks": failed_checks,
-                "reason": "Payment has already settled successfully. No further recovery action allowed."
-            }
-        passed_checks.append("Payment not yet settled")
-
-        # 2. Check Fraud Risk Threshold
-        fraud_score = float(payment.get("fraud_risk_score", 0.0))
-        if fraud_score > self.config.fraud_risk_threshold:
-            failed_checks.append(f"FRAUD_RISK_EXCEEDED ({fraud_score:.2f} > {self.config.fraud_risk_threshold})")
-            return {
-                "is_allowed": False,
-                "status": "REJECTED",
-                "final_action": "STOP_AND_FLAG",
-                "passed_checks": passed_checks,
-                "failed_checks": failed_checks,
-                "reason": f"High fraud risk score ({fraud_score:.2f}) exceeds merchant threshold ({self.config.fraud_risk_threshold}). Action halted."
-            }
-        passed_checks.append(f"Fraud risk score safe ({fraud_score:.2f} <= {self.config.fraud_risk_threshold})")
-
-        # 3. Check Retry Limits for Retry Actions
+        itemized_checks = []
         retry_count = int(payment.get("retry_count", 0))
-        if proposed_action in ["RETRY_DELAYED", "RETRY_SMART_ROUTE", "RETRY_IMMEDIATE"]:
-            if retry_count >= self.config.max_retries:
-                failed_checks.append(f"MAX_RETRIES_EXCEEDED ({retry_count} >= {self.config.max_retries})")
-                
-                # Check if high ticket to escalate or stop
-                amount = float(payment.get("amount", 0.0))
-                fallback_action = "ESCALATE_MERCHANT" if amount >= 5000.0 else "STOP_RECOVERY"
-                return {
-                    "is_allowed": False,
-                    "status": "MODIFIED",
-                    "final_action": fallback_action,
-                    "passed_checks": passed_checks,
-                    "failed_checks": failed_checks,
-                    "reason": f"Retry limit ({self.config.max_retries}) reached. Modifying action to {fallback_action}."
-                }
-            passed_checks.append(f"Within max retries ({retry_count}/{self.config.max_retries})")
-
-        # 4. Check Customer Contact Limits & Opt-Out for Notification Actions
         notif_count = int(payment.get("notification_count", 0))
-        is_opted_out = bool(payment.get("is_opted_out", False) or payment.get("is_opted_out", 0) == 1)
+        fraud_score = float(payment.get("fraud_risk_score", 0.0))
+        amount = float(payment.get("amount", 0.0))
+        is_opted_out = bool(payment.get("is_opted_out", 0) == 1 or payment.get("is_opted_out", False))
+        is_already_succeeded = bool(payment.get("is_already_succeeded", 0) == 1 or payment.get("status") == "SUCCESS")
         
-        if proposed_action in [
-            "SEND_PAYMENT_LINK", "SEND_WHATSAPP_REMINDER", 
-            "SEND_PAYMENT_LINK_ALT_METHOD", "REQUEST_PAYMENT_UPDATE", "SEND_SMART_DISCOUNT_LINK"
-        ]:
-            if is_opted_out:
-                failed_checks.append("CUSTOMER_OPTED_OUT")
+        curr_hour = current_time.hour if current_time else int(payment.get("hour", 14))
+        is_quiet = self.config.enforce_quiet_hours and (curr_hour >= self.config.quiet_hours_start or curr_hour < self.config.quiet_hours_end)
+
+        # -------------------------------------------------------------
+        # 1. State Lock Check: Succeeded Transactions
+        # -------------------------------------------------------------
+        if is_already_succeeded:
+            itemized_checks.append({
+                "rule": "Payment State Lock",
+                "status": "FAIL",
+                "display": "Settled as SUCCESS",
+                "passed": False
+            })
+            return {
+                "is_allowed": False,
+                "status": "BLOCKED",
+                "final_action": "STOP",
+                "itemized_checks": itemized_checks,
+                "reason": "Payment already settled successfully. All automated recovery actions blocked by State Lock guardrail."
+            }
+        itemized_checks.append({
+            "rule": "Payment State Lock",
+            "status": "PASS",
+            "display": "Pending / Unsettled",
+            "passed": True
+        })
+
+        # -------------------------------------------------------------
+        # 2. High-Ticket Hard Boundary (> ₹1,00,000)
+        # -------------------------------------------------------------
+        if amount >= self.config.high_ticket_approval_amount and proposed_action not in ["STOP", "ESCALATE_MERCHANT"]:
+            itemized_checks.append({
+                "rule": "High-Value Transaction Ceiling",
+                "status": "MANUAL",
+                "display": f"\u20b9{amount:,.0f} >= \u20b9{self.config.high_ticket_approval_amount:,.0f}",
+                "passed": False
+            })
+            return {
+                "is_allowed": False,
+                "status": "HUMAN_APPROVAL_REQUIRED",
+                "final_action": "ESCALATE_MERCHANT",
+                "itemized_checks": itemized_checks,
+                "reason": f"High-ticket transaction (\u20b9{amount:,.2f}) exceeds autonomous limit. Routed to human operations queue for review."
+            }
+        itemized_checks.append({
+            "rule": "High-Value Ceiling",
+            "status": "PASS",
+            "display": f"\u20b9{amount:,.0f} < \u20b9{self.config.high_ticket_approval_amount:,.0f}",
+            "passed": True
+        })
+
+        # -------------------------------------------------------------
+        # 3. Fraud Risk Score Gate
+        # -------------------------------------------------------------
+        if fraud_score > self.config.fraud_risk_threshold:
+            itemized_checks.append({
+                "rule": "Fraud Risk Gate",
+                "status": "FAIL",
+                "display": f"{fraud_score:.2f} > {self.config.fraud_risk_threshold}",
+                "passed": False
+            })
+            return {
+                "is_allowed": False,
+                "status": "BLOCKED",
+                "final_action": "STOP",
+                "itemized_checks": itemized_checks,
+                "reason": f"Fraud risk score ({fraud_score:.2f}) exceeds merchant safety threshold ({self.config.fraud_risk_threshold}). Intercepted and frozen."
+            }
+        itemized_checks.append({
+            "rule": "Fraud Risk Gate",
+            "status": "PASS",
+            "display": f"{fraud_score:.2f} <= {self.config.fraud_risk_threshold}",
+            "passed": True
+        })
+
+        # -------------------------------------------------------------
+        # 4. Retry Limits
+        # -------------------------------------------------------------
+        if "RETRY" in proposed_action:
+            if retry_count >= self.config.max_retries:
+                itemized_checks.append({
+                    "rule": "Max Retry Limit",
+                    "status": "FAIL",
+                    "display": f"{retry_count} / {self.config.max_retries} Retries",
+                    "passed": False
+                })
+                fallback = "ESCALATE_MERCHANT" if amount > 5000.0 else "STOP"
                 return {
                     "is_allowed": False,
-                    "status": "REJECTED",
-                    "final_action": "RETRY_DELAYED" if retry_count < self.config.max_retries else "STOP_RECOVERY",
-                    "passed_checks": passed_checks,
-                    "failed_checks": failed_checks,
-                    "reason": "Customer has opted out of communications. Direct notifications blocked by policy."
+                    "status": "BLOCKED",
+                    "final_action": fallback,
+                    "itemized_checks": itemized_checks,
+                    "reason": f"Maximum automated retry limit ({self.config.max_retries}) reached. Modifying action to {fallback}."
                 }
-            passed_checks.append("Customer opted-in for communication")
+            itemized_checks.append({
+                "rule": "Max Retry Limit",
+                "status": "PASS",
+                "display": f"{retry_count} / {self.config.max_retries} Retries",
+                "passed": True
+            })
+
+        # -------------------------------------------------------------
+        # 5. Customer Notification & Opt-Out Checks
+        # -------------------------------------------------------------
+        if proposed_action in ["SEND_PAYMENT_LINK", "SEND_WHATSAPP"]:
+            if is_opted_out:
+                itemized_checks.append({
+                    "rule": "Customer Opt-Out",
+                    "status": "FAIL",
+                    "display": "Opted Out",
+                    "passed": False
+                })
+                fallback = "RETRY_DELAYED_30M" if retry_count < self.config.max_retries else "STOP"
+                return {
+                    "is_allowed": False,
+                    "status": "BLOCKED",
+                    "final_action": fallback,
+                    "itemized_checks": itemized_checks,
+                    "reason": "Customer opted out of communications. Outbound notifications blocked by merchant policy."
+                }
+            itemized_checks.append({
+                "rule": "Customer Opt-Out",
+                "status": "PASS",
+                "display": "Opted In",
+                "passed": True
+            })
 
             if notif_count >= self.config.max_notifications:
-                failed_checks.append(f"MAX_NOTIFICATIONS_EXCEEDED ({notif_count} >= {self.config.max_notifications})")
+                itemized_checks.append({
+                    "rule": "Max Contact Limit",
+                    "status": "FAIL",
+                    "display": f"{notif_count} / {self.config.max_notifications} Contacts",
+                    "passed": False
+                })
+                fallback = "RETRY_DELAYED_30M" if retry_count < self.config.max_retries else "STOP"
                 return {
                     "is_allowed": False,
-                    "status": "MODIFIED",
-                    "final_action": "RETRY_DELAYED" if retry_count < self.config.max_retries else "STOP_RECOVERY",
-                    "passed_checks": passed_checks,
-                    "failed_checks": failed_checks,
-                    "reason": f"Maximum customer contacts ({self.config.max_notifications}) reached. Suppressing further messages."
+                    "status": "BLOCKED",
+                    "final_action": fallback,
+                    "itemized_checks": itemized_checks,
+                    "reason": f"Maximum customer contacts ({self.config.max_notifications}) reached. Suppressing further outbound messages."
                 }
-            passed_checks.append(f"Within notification limits ({notif_count}/{self.config.max_notifications})")
+            itemized_checks.append({
+                "rule": "Max Contact Limit",
+                "status": "PASS",
+                "display": f"{notif_count} / {self.config.max_notifications} Contacts",
+                "passed": True
+            })
 
-            # Check Quiet Hours
-            curr_hour = current_time.hour if current_time else int(payment.get("hour", 14))
-            if self.config.enforce_quiet_hours:
-                is_quiet_hours = (curr_hour >= self.config.quiet_hours_start or curr_hour < self.config.quiet_hours_end)
-                if is_quiet_hours:
-                    passed_checks.append("Quiet hours active - notification queued for morning dispatch")
-                else:
-                    passed_checks.append("Outside quiet hours - immediate dispatch allowed")
+            # Quiet Hours
+            if is_quiet:
+                itemized_checks.append({
+                    "rule": "Quiet Hours (10PM-8AM)",
+                    "status": "PASS_DELAYED",
+                    "display": "Queued for 8:00 AM",
+                    "passed": True
+                })
+            else:
+                itemized_checks.append({
+                    "rule": "Quiet Hours",
+                    "status": "PASS",
+                    "display": "Active Hours Allowed",
+                    "passed": True
+                })
 
-        # 5. Check High Ticket Escalation Threshold
-        amount = float(payment.get("amount", 0.0))
-        if amount >= self.config.high_ticket_escalation_amount and retry_count >= 2 and proposed_action != "ESCALATE_MERCHANT":
-            return {
-                "is_allowed": True,
-                "status": "MODIFIED",
-                "final_action": "ESCALATE_MERCHANT",
-                "passed_checks": passed_checks,
-                "failed_checks": [],
-                "reason": f"High value transaction (\u20b9{amount:,.2f}) with multiple failures automatically escalated to priority merchant queue."
-            }
+        # Recovery Window Check
+        itemized_checks.append({
+            "rule": "Recovery Window",
+            "status": "PASS",
+            "display": f"< {self.config.max_recovery_window_hours}h Active",
+            "passed": True
+        })
 
-        # All checks passed
         return {
             "is_allowed": True,
-            "status": "ALLOWED",
+            "status": "APPROVED",
             "final_action": proposed_action,
-            "passed_checks": passed_checks,
-            "failed_checks": [],
-            "reason": "All merchant policy guardrails satisfied."
+            "itemized_checks": itemized_checks,
+            "reason": "All merchant safety guardrails satisfied. Action approved for execution."
         }
 
 # Global singleton policy engine

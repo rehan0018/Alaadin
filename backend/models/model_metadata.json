@@ -1,82 +1,132 @@
 {
   "metrics": {
-    "roc_auc": 0.8259,
-    "accuracy": 0.7393,
-    "precision": 0.7058,
-    "recall": 0.7471,
+    "roc_auc": 0.8119,
+    "pr_auc": 0.7495,
+    "brier_score": 0.1749,
+    "expected_calibration_error_ece": 0.0076,
+    "accuracy": 0.7253,
+    "precision": 0.6872,
+    "recall": 0.7141,
+    "f1_score": 0.7004,
     "test_samples": 7500,
     "confusion_matrix": [
       [
-        2957,
-        1079
+        3032,
+        1096
       ],
       [
-        876,
-        2588
+        964,
+        2408
       ]
     ]
   },
   "feature_importances": [
     {
       "feature": "failure_code_FRAUD_SUSPECTED",
-      "importance": 0.3541
+      "importance": 0.3379
     },
     {
       "feature": "failure_code_NETWORK_TIMEOUT",
-      "importance": 0.08
+      "importance": 0.0852
     },
     {
       "feature": "failure_code_BANK_SERVER_ERROR",
-      "importance": 0.0735
-    },
-    {
-      "feature": "failure_code_AUTH_FAILED_OTP_TIMEOUT",
-      "importance": 0.0731
+      "importance": 0.0824
     },
     {
       "feature": "retry_count",
-      "importance": 0.0684
+      "importance": 0.0687
+    },
+    {
+      "feature": "failure_code_AUTH_FAILED_OTP_TIMEOUT",
+      "importance": 0.0645
     },
     {
       "feature": "failure_code_CARD_EXPIRED",
-      "importance": 0.0643
+      "importance": 0.0571
     },
     {
       "feature": "failure_code_CHECKOUT_ABANDONED",
-      "importance": 0.0613
+      "importance": 0.0434
     },
     {
       "feature": "failure_code_INVALID_CVV_DETAILS",
-      "importance": 0.0519
+      "importance": 0.0426
     },
     {
       "feature": "fraud_risk_score",
-      "importance": 0.0195
+      "importance": 0.0219
+    },
+    {
+      "feature": "failure_code_INSUFFICIENT_FUNDS",
+      "importance": 0.0214
     },
     {
       "feature": "failure_code_UPI_TRANSACTION_LIMIT",
-      "importance": 0.0173
+      "importance": 0.0206
     },
     {
-      "feature": "failure_code_MANDATE_EXECUTION_FAILED",
-      "importance": 0.0139
-    },
-    {
-      "feature": "hour",
-      "importance": 0.0096
-    },
-    {
-      "feature": "notification_count",
-      "importance": 0.009
-    },
-    {
-      "feature": "payment_method_MANDATE",
-      "importance": 0.0081
+      "feature": "time_since_failure_mins",
+      "importance": 0.0172
     },
     {
       "feature": "payment_method_UPI",
-      "importance": 0.0076
+      "importance": 0.0164
+    },
+    {
+      "feature": "failure_code_MANDATE_EXECUTION_FAILED",
+      "importance": 0.0095
+    },
+    {
+      "feature": "hour",
+      "importance": 0.009
     }
   ],
-  "feature_count": 34
+  "calibration_data": {
+    "brier_score": 0.1749,
+    "ece": 0.0076,
+    "curve": [
+      {
+        "predicted_prob": 0.017,
+        "empirical_prob": 0.013
+      },
+      {
+        "predicted_prob": 0.15,
+        "empirical_prob": 0.165
+      },
+      {
+        "predicted_prob": 0.252,
+        "empirical_prob": 0.244
+      },
+      {
+        "predicted_prob": 0.353,
+        "empirical_prob": 0.35
+      },
+      {
+        "predicted_prob": 0.453,
+        "empirical_prob": 0.465
+      },
+      {
+        "predicted_prob": 0.55,
+        "empirical_prob": 0.556
+      },
+      {
+        "predicted_prob": 0.646,
+        "empirical_prob": 0.663
+      },
+      {
+        "predicted_prob": 0.752,
+        "empirical_prob": 0.753
+      },
+      {
+        "predicted_prob": 0.844,
+        "empirical_prob": 0.849
+      },
+      {
+        "predicted_prob": 0.907,
+        "empirical_prob": 0.833
+      }
+    ]
+  },
+  "feature_count": 36
 }

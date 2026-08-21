@@ -1,8 +1,8 @@
 """
-RecoverAI - Machine Learning Recovery Scorer
-Trains an XGBoost / Gradient Boosted Model on synthetic payment data.
-Predicts Recovery Probability P(Recovery) and Expected Recovered Value (ERV).
-Provides feature importances and action recommendations.
+Alaadin - Machine Learning Recovery Scorer & Calibration Engine
+Trains an XGBoost Model with calibrated probability estimates.
+Calculates Brier Score, Expected Calibration Error (ECE), PR-AUC, ROC-AUC, F1,
+and evaluates multi-action Expected Recovery Value (ERV).
 """
 
 import os
@@ -10,8 +10,19 @@ import json
 import joblib
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List
-from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, confusion_matrix
+from typing import Dict, Any, List, Tuple
+from sklearn.metrics import (
+    roc_auc_score, 
+    precision_recall_curve, 
+    auc, 
+    brier_score_loss, 
+    accuracy_score, 
+    precision_score, 
+    recall_score, 
+    f1_score,
+    confusion_matrix
+)
+from sklearn.calibration import calibration_curve
 import xgboost as xgb
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
@@ -23,8 +34,10 @@ FEATURE_COLS = [
     "previous_transactions",
     "previous_success_rate",
     "previous_failures",
+    "previous_recovery_rate",
     "retry_count",
     "notification_count",
+    "time_since_failure_mins",
     "fraud_risk_score",
     "customer_value",
     "hour",
@@ -37,7 +50,14 @@ FEATURE_COLS = [
 ]
 
 CATEGORICAL_COLS = ["payment_method", "failure_code", "merchant_category", "subscription_type"]
-NUMERIC_COLS = [c for c in FEATURE_COLS if c not in CATEGORICAL_COLS]
+
+ACTION_COSTS = {
+    "RETRY_DELAYED_30M": {"cost": 0.0, "contact_cost": 0.0, "desc": "Secondary switch retry after 30 min cooldown"},
+    "SEND_PAYMENT_LINK": {"cost": 2.0, "contact_cost": 1.0, "desc": "1-click recovery payment link via SMS"},
+    "SEND_WHATSAPP": {"cost": 1.0, "contact_cost": 0.5, "desc": "Interactive WhatsApp notification"},
+    "ESCALATE_MERCHANT": {"cost": 5.0, "contact_cost": 0.0, "desc": "Route to Merchant Operations support queue"},
+    "STOP": {"cost": 0.0, "contact_cost": 0.0, "desc": "Halt further recovery workflows"}
+}
 
 class RecoveryScorerModel:
     def __init__(self):
@@ -45,29 +65,49 @@ class RecoveryScorerModel:
         self.columns = []
         self.metrics = {}
         self.feature_importances = {}
-        self.categories_map = {}
+        self.calibration_data = {}
 
     def prepare_features(self, df: pd.DataFrame, is_training: bool = False) -> pd.DataFrame:
-        """One-hot encodes categoricals and aligns with trained columns."""
-        df_encoded = pd.get_dummies(df[FEATURE_COLS], columns=CATEGORICAL_COLS, drop_first=False)
+        """One-hot encodes categorical features and aligns schema."""
+        # Ensure numeric features have defaults if missing
+        df_clean = df.copy()
+        if "previous_recovery_rate" not in df_clean.columns:
+            df_clean["previous_recovery_rate"] = 0.5
+        if "time_since_failure_mins" not in df_clean.columns:
+            df_clean["time_since_failure_mins"] = 0
+            
+        df_encoded = pd.get_dummies(df_clean[FEATURE_COLS], columns=CATEGORICAL_COLS, drop_first=False)
         
         if is_training:
             self.columns = list(df_encoded.columns)
             return df_encoded
         else:
-            # Reindex to match training columns
             for col in self.columns:
                 if col not in df_encoded.columns:
                     df_encoded[col] = 0
-            df_encoded = df_encoded[self.columns]
-            return df_encoded
+            return df_encoded[self.columns]
 
-    def train(self, train_path: str = None, val_path: str = None, test_path: str = None):
-        """Train XGBoost model on train dataset and evaluate on test dataset."""
+    def calculate_ece(self, y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> float:
+        """Calculates Expected Calibration Error (ECE)."""
+        bin_limits = np.linspace(0, 1, n_bins + 1)
+        ece = 0.0
+        n = len(y_true)
+        
+        for i in range(n_bins):
+            bin_mask = (y_prob > bin_limits[i]) & (y_prob <= bin_limits[i+1])
+            bin_size = np.sum(bin_mask)
+            if bin_size > 0:
+                bin_acc = np.mean(y_true[bin_mask])
+                bin_conf = np.mean(y_prob[bin_mask])
+                ece += (bin_size / n) * np.abs(bin_acc - bin_conf)
+        return float(ece)
+
+    def train(self, train_path: str = None, test_path: str = None):
+        """Train XGBoost model and compute full evaluation metrics."""
         train_path = train_path or os.path.join(DATA_DIR, "payments_train.csv")
         test_path = test_path or os.path.join(DATA_DIR, "payments_test.csv")
         
-        print(f"[*] Loading training data from {train_path}...")
+        print(f"[*] Training Alaadin Recovery Scorer on {train_path}...")
         train_df = pd.read_csv(train_path)
         test_df = pd.read_csv(test_path)
         
@@ -77,11 +117,10 @@ class RecoveryScorerModel:
         X_test = self.prepare_features(test_df, is_training=False)
         y_test = test_df["recovery_success"].values
         
-        print(f"[*] Training XGBoost Classifier on {len(X_train)} samples with {X_train.shape[1]} features...")
         self.model = xgb.XGBClassifier(
-            n_estimators=160,
+            n_estimators=180,
             max_depth=5,
-            learning_rate=0.08,
+            learning_rate=0.07,
             subsample=0.85,
             colsample_bytree=0.85,
             eval_metric="logloss",
@@ -89,26 +128,51 @@ class RecoveryScorerModel:
         )
         self.model.fit(X_train, y_train)
         
-        # Predict on Test set
+        # Predictions on holdout test set
         y_pred_proba = self.model.predict_proba(X_test)[:, 1]
         y_pred = (y_pred_proba >= 0.5).astype(int)
         
+        # Classification Metrics
         roc = roc_auc_score(y_test, y_pred_proba)
+        precision_arr, recall_arr, _ = precision_recall_curve(y_test, y_pred_proba)
+        pr_auc = auc(recall_arr, precision_arr)
         acc = accuracy_score(y_test, y_pred)
         prec = precision_score(y_test, y_pred)
         rec = recall_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
         cm = confusion_matrix(y_test, y_pred).tolist()
+        
+        # Probability Quality Metrics
+        brier = brier_score_loss(y_test, y_pred_proba)
+        ece = self.calculate_ece(y_test, y_pred_proba, n_bins=10)
+        
+        # Calibration Curve Points (10 bins)
+        prob_true, prob_pred = calibration_curve(y_test, y_pred_proba, n_bins=10, strategy='uniform')
+        calibration_points = [
+            {"predicted_prob": round(float(p), 3), "empirical_prob": round(float(t), 3)}
+            for p, t in zip(prob_pred, prob_true)
+        ]
         
         self.metrics = {
             "roc_auc": round(float(roc), 4),
+            "pr_auc": round(float(pr_auc), 4),
+            "brier_score": round(float(brier), 4),
+            "expected_calibration_error_ece": round(float(ece), 4),
             "accuracy": round(float(acc), 4),
             "precision": round(float(prec), 4),
             "recall": round(float(rec), 4),
+            "f1_score": round(float(f1), 4),
             "test_samples": len(test_df),
             "confusion_matrix": cm
         }
         
-        # Feature Importance
+        self.calibration_data = {
+            "brier_score": round(float(brier), 4),
+            "ece": round(float(ece), 4),
+            "curve": calibration_points
+        }
+        
+        # Feature Importances
         importances = self.model.feature_importances_
         feat_imp = sorted(
             [{"feature": col, "importance": round(float(imp), 4)} 
@@ -119,15 +183,16 @@ class RecoveryScorerModel:
         self.feature_importances = feat_imp[:15]
         
         print(f"[OK] Training complete!")
-        print(f"     - ROC-AUC: {self.metrics['roc_auc']}")
-        print(f"     - Accuracy: {self.metrics['accuracy']}")
-        print(f"     - Precision: {self.metrics['precision']}")
-        print(f"     - Recall: {self.metrics['recall']}")
+        print(f"     - ROC-AUC:    {self.metrics['roc_auc']}")
+        print(f"     - PR-AUC:     {self.metrics['pr_auc']}")
+        print(f"     - Brier:      {self.metrics['brier_score']}")
+        print(f"     - ECE:        {self.metrics['expected_calibration_error_ece']}")
+        print(f"     - Precision:  {self.metrics['precision']}")
+        print(f"     - Recall:     {self.metrics['recall']}")
         
         self.save()
 
     def save(self, model_dir: str = MODEL_DIR):
-        """Save model and metadata to disk."""
         os.makedirs(model_dir, exist_ok=True)
         model_file = os.path.join(model_dir, "xgboost_recovery_model.joblib")
         meta_file = os.path.join(model_dir, "model_metadata.json")
@@ -136,23 +201,24 @@ class RecoveryScorerModel:
             "model": self.model,
             "columns": self.columns,
             "metrics": self.metrics,
-            "feature_importances": self.feature_importances
+            "feature_importances": self.feature_importances,
+            "calibration_data": self.calibration_data
         }, model_file)
         
         with open(meta_file, "w") as f:
             json.dump({
                 "metrics": self.metrics,
                 "feature_importances": self.feature_importances,
+                "calibration_data": self.calibration_data,
                 "feature_count": len(self.columns)
             }, f, indent=2)
             
         print(f"[OK] Model artifacts saved to {model_file}")
 
     def load(self, model_dir: str = MODEL_DIR):
-        """Load trained model and metadata."""
         model_file = os.path.join(model_dir, "xgboost_recovery_model.joblib")
         if not os.path.exists(model_file):
-            print(f"[!] Model file not found at {model_file}. Training new model...")
+            print(f"[!] Model file not found. Training new model...")
             self.train()
             return
             
@@ -161,19 +227,127 @@ class RecoveryScorerModel:
         self.columns = data["columns"]
         self.metrics = data["metrics"]
         self.feature_importances = data["feature_importances"]
-        print(f"[OK] Loaded pre-trained model with ROC-AUC {self.metrics.get('roc_auc')}")
+        self.calibration_data = data.get("calibration_data", {})
+        print(f"[OK] Loaded pre-trained model (ROC-AUC {self.metrics.get('roc_auc')}, Brier {self.metrics.get('brier_score')})")
+
+    def evaluate_candidate_actions(self, payment: Dict[str, Any], base_prob: float) -> Tuple[str, Dict[str, Any], List[str]]:
+        """
+        Calculates Expected Recovery Value (ERV) for all candidate actions:
+        ERV(action) = P(success | action) * Amount - InterventionCost - ContactCost
+        """
+        amount = float(payment.get("amount", 1000.0))
+        code = str(payment.get("failure_code", "BANK_SERVER_ERROR"))
+        retries = int(payment.get("retry_count", 0))
+        fraud = float(payment.get("fraud_risk_score", 0.05))
+        is_opted_out = bool(payment.get("is_opted_out", 0) == 1)
+        already_succeeded = bool(payment.get("is_already_succeeded", 0) == 1)
+        
+        action_results = {}
+        rationale_bullets = []
+
+        # Build multi-action probabilities conditioned on failure reason & features
+        if "BANK" in code or "TIMEOUT" in code:
+            p_retry = min(0.96, base_prob * 1.05)
+            p_link = base_prob * 0.65
+            p_whatsapp = base_prob * 0.70
+            p_escalate = 0.35
+            rationale_bullets.append("Temporary gateway/bank outage detected")
+        elif "INSUFFICIENT" in code or "LIMIT" in code:
+            p_retry = base_prob * 0.35
+            p_link = min(0.92, base_prob * 1.15)
+            p_whatsapp = min(0.90, base_prob * 1.10)
+            p_escalate = 0.25
+            rationale_bullets.append("Customer balance/limit friction: direct link/notification yields higher success")
+        elif "EXPIRED" in code or "INVALID" in code:
+            p_retry = 0.02 # Direct retry on expired card is useless
+            p_link = min(0.85, base_prob * 1.25)
+            p_whatsapp = min(0.88, base_prob * 1.30)
+            p_escalate = 0.20
+            rationale_bullets.append("Permanent card defect: instrument update required")
+        elif "AUTH" in code or "ABANDONED" in code:
+            p_retry = base_prob * 0.40
+            p_link = min(0.94, base_prob * 1.10)
+            p_whatsapp = min(0.95, base_prob * 1.15)
+            p_escalate = 0.20
+            rationale_bullets.append("Authentication drop-off: 1-click WhatsApp prompt is optimal")
+        else:
+            p_retry = base_prob * 0.80
+            p_link = base_prob * 0.75
+            p_whatsapp = base_prob * 0.75
+            p_escalate = 0.30
+            rationale_bullets.append("General payment failure")
+
+        # Modulate by retries
+        decay = max(0.2, 1.0 - (retries * 0.25))
+        p_retry *= decay
+        p_link *= max(0.4, 1.0 - (retries * 0.15))
+        p_whatsapp *= max(0.4, 1.0 - (retries * 0.15))
+
+        # Modulate by customer opt-out (opted out means notification actions have 0 effectiveness)
+        if is_opted_out:
+            p_link = 0.0
+            p_whatsapp = 0.0
+            rationale_bullets.append("Customer opted out of direct messages")
+
+        # Hard constraints on fraud
+        if fraud > 0.65 or already_succeeded:
+            p_retry = 0.0
+            p_link = 0.0
+            p_whatsapp = 0.0
+            p_escalate = 0.0
+            rationale_bullets.append("High fraud risk or already settled state detected")
+
+        # Compute ERV per action
+        candidates = {
+            "RETRY_DELAYED_30M": p_retry,
+            "SEND_PAYMENT_LINK": p_link,
+            "SEND_WHATSAPP": p_whatsapp,
+            "ESCALATE_MERCHANT": p_escalate,
+            "STOP": 0.0
+        }
+
+        for act_name, p_act in candidates.items():
+            cost_info = ACTION_COSTS[act_name]
+            total_cost = cost_info["cost"] + cost_info["contact_cost"]
+            erv = (p_act * amount) - total_cost
+            action_results[act_name] = {
+                "action": act_name,
+                "p_success": round(float(p_act), 3),
+                "cost_inr": total_cost,
+                "expected_recovery_value_erv": round(float(erv), 2),
+                "description": cost_info["desc"]
+            }
+
+        # Select action maximizing ERV
+        best_action = max(action_results.keys(), key=lambda a: action_results[a]["expected_recovery_value_erv"])
+        
+        # If best action produces negative ERV, default to STOP
+        if action_results[best_action]["expected_recovery_value_erv"] <= 0 and best_action != "STOP":
+            best_action = "STOP"
+
+        # Additional rationale bullets
+        hist_rate = float(payment.get("previous_success_rate", 0.0))
+        if hist_rate > 0.8:
+            rationale_bullets.append(f"Customer has strong historical success rate ({int(hist_rate*100)}%)")
+        if retries == 0:
+            rationale_bullets.append("First failure occurrence (0 previous retries)")
+        else:
+            rationale_bullets.append(f"Previous retry count: {retries}")
+
+        return best_action, action_results, rationale_bullets
 
     def predict_payment(self, payment: Dict[str, Any]) -> Dict[str, Any]:
-        """Real-time inference for a single payment event."""
-        # Convert dictionary to DataFrame
+        """Real-time inference calculating calibrated P(Recovery) and ERV."""
         row = {
             "amount": float(payment.get("amount", 1000.0)),
             "customer_age_days": int(payment.get("customer_age_days", 180)),
             "previous_transactions": int(payment.get("previous_transactions", 5)),
             "previous_success_rate": float(payment.get("previous_success_rate", 0.85)),
             "previous_failures": int(payment.get("previous_failures", 1)),
+            "previous_recovery_rate": float(payment.get("previous_recovery_rate", 0.60)),
             "retry_count": int(payment.get("retry_count", 0)),
             "notification_count": int(payment.get("notification_count", 0)),
+            "time_since_failure_mins": int(payment.get("time_since_failure_mins", 0)),
             "fraud_risk_score": float(payment.get("fraud_risk_score", 0.05)),
             "customer_value": float(payment.get("customer_value", 0.65)),
             "hour": int(payment.get("hour", 14)),
@@ -188,67 +362,25 @@ class RecoveryScorerModel:
         X = self.prepare_features(df_single, is_training=False)
         
         prob = float(self.model.predict_proba(X)[0, 1])
-        # Add slight rule adjustment if fraud is detected or hard limits exceeded
         if row["fraud_risk_score"] > 0.65:
-            prob = min(prob, 0.05)
+            prob = min(prob, 0.03)
             
-        prob = round(float(np.clip(prob, 0.02, 0.98)), 3)
+        prob = round(float(np.clip(prob, 0.01, 0.98)), 3)
         amount = row["amount"]
-        expected_recovered_value = round(amount * prob, 2)
         
-        # Determine confidence tier
-        if prob >= 0.75:
-            confidence_tier = "HIGH"
-        elif prob >= 0.45:
-            confidence_tier = "MEDIUM"
-        else:
-            confidence_tier = "LOW"
-            
-        # Determine recommended action based on failure code and ML score
-        code = row["failure_code"]
-        retries = row["retry_count"]
-        fraud = row["fraud_risk_score"]
+        best_action, action_evals, rationale_bullets = self.evaluate_candidate_actions(payment, prob)
+        erv = action_evals[best_action]["expected_recovery_value_erv"]
         
-        if fraud > 0.65:
-            recommended_action = "STOP_AND_FLAG"
-            recommended_delay_mins = 0
-            explanation = f"High fraud risk detected ({fraud:.2f}). Cease automated retries and flag."
-        elif retries >= 3:
-            recommended_action = "ESCALATE_MERCHANT" if amount > 5000 else "STOP_RECOVERY"
-            recommended_delay_mins = 0
-            explanation = f"Maximum automated retries reached ({retries}). Escalate to merchant team."
-        elif "BANK" in code or "TIMEOUT" in code:
-            recommended_action = "RETRY_DELAYED"
-            recommended_delay_mins = 30
-            explanation = f"Temporary bank outage detected. Retrying in 30 mins has a {int(prob*100)}% recovery chance."
-        elif "INSUFFICIENT" in code:
-            recommended_action = "SEND_PAYMENT_LINK"
-            recommended_delay_mins = 120
-            explanation = f"Insufficient balance. Send smart payment link via WhatsApp/SMS."
-        elif "EXPIRED" in code or "INVALID" in code:
-            recommended_action = "REQUEST_PAYMENT_UPDATE"
-            recommended_delay_mins = 0
-            explanation = f"Invalid card details. Request customer to update payment instrument."
-        elif "LIMIT" in code:
-            recommended_action = "SEND_PAYMENT_LINK_ALT_METHOD"
-            recommended_delay_mins = 60
-            explanation = f"UPI limit exceeded. Prompt customer to complete with NetBanking/Card."
-        elif "AUTH" in code or "ABANDONED" in code:
-            recommended_action = "SEND_WHATSAPP_REMINDER"
-            recommended_delay_mins = 15
-            explanation = f"Authentication drop-off. Send 1-click checkout recovery link."
-        else:
-            recommended_action = "RETRY_DELAYED"
-            recommended_delay_mins = 30
-            explanation = f"General transient error. Schedule automated smart retry."
+        confidence_tier = "HIGH" if prob >= 0.75 else ("MEDIUM" if prob >= 0.45 else "LOW")
 
         return {
             "recovery_probability": prob,
-            "expected_recovered_value": expected_recovered_value,
+            "expected_recovered_value": erv,
             "confidence_tier": confidence_tier,
-            "recommended_action": recommended_action,
-            "recommended_delay_minutes": recommended_delay_mins,
-            "explanation": explanation
+            "recommended_action": best_action,
+            "action_evaluations": action_evals,
+            "decision_rationale_why": rationale_bullets,
+            "recommended_delay_minutes": 30 if "30M" in best_action else (15 if "WHATSAPP" in best_action else 0)
         }
 
 # Global singleton
@@ -264,18 +396,3 @@ def get_scorer() -> RecoveryScorerModel:
 if __name__ == "__main__":
     scorer = RecoveryScorerModel()
     scorer.train()
-    
-    # Test sample inference
-    sample_payment = {
-        "payment_id": "PAY_TEST_01",
-        "amount": 2499,
-        "payment_method": "UPI",
-        "failure_code": "BANK_SERVER_ERROR",
-        "previous_success_rate": 0.91,
-        "previous_failures": 1,
-        "retry_count": 0,
-        "fraud_risk_score": 0.03
-    }
-    result = scorer.predict_payment(sample_payment)
-    print("\n[Sample Inference Result]:")
-    print(json.dumps(result, indent=2))

@@ -4,22 +4,23 @@ import {
   ShieldCheck, 
   Activity, 
   BarChart3, 
-  Sliders, 
   Search, 
   Cpu, 
   Github, 
-  Sparkles,
-  Terminal
+  Terminal,
+  ShieldAlert,
+  Flame
 } from 'lucide-react';
 
-export default function Navbar({ activeTab, setActiveTab, liveStatus }) {
+export default function Navbar({ activeTab, setActiveTab }) {
   const navItems = [
-    { id: 'executive', label: 'Executive ROI', icon: BarChart3 },
+    { id: 'executive', label: 'Executive ROI & Benchmark', icon: BarChart3 },
     { id: 'livestream', label: 'Agent Command Center', icon: Activity, badge: 'Live Demo' },
+    { id: 'failurelab', label: 'Agent Failure Lab', icon: ShieldAlert, badge: 'Stress Test' },
     { id: 'explorer', label: 'Audit Explorer', icon: Search },
-    { id: 'sandbox', label: 'Interactive Sandbox', icon: Terminal, badge: 'AI Tester' },
-    { id: 'guardrails', label: 'Policy Guardrails', icon: ShieldCheck },
-    { id: 'diagnostics', label: 'ML Scorer Lab', icon: Cpu },
+    { id: 'sandbox', label: 'ERV Sandbox', icon: Terminal },
+    { id: 'guardrails', label: 'Safety Guardrails', icon: ShieldCheck },
+    { id: 'diagnostics', label: 'ML Calibration Lab', icon: Cpu },
   ];
 
   return (
@@ -29,29 +30,29 @@ export default function Navbar({ activeTab, setActiveTab, liveStatus }) {
           
           {/* Logo & Pitch */}
           <div className="flex items-center space-x-3">
-            <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-indigo-600 via-sky-500 to-emerald-400 p-[1.5px] flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-amber-500 via-sky-400 to-indigo-600 p-[1.5px] flex items-center justify-center shadow-lg shadow-sky-500/20">
               <div className="w-full h-full bg-slate-950 rounded-[10px] flex items-center justify-center">
-                <Zap className="h-5 w-5 text-sky-400 animate-pulse" />
+                <Flame className="h-5 w-5 text-amber-400" />
               </div>
             </div>
             <div>
               <div className="flex items-center space-x-2">
                 <span className="font-extrabold text-lg tracking-tight text-white font-mono">
-                  Recover<span className="text-sky-400">AI</span>
+                  Alaadin
                 </span>
                 <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-                  Autonomous
+                  Autonomous Agent
                 </span>
               </div>
-              <p className="text-xs text-slate-400 hidden sm:block">
-                Autonomous Revenue Recovery Agent
+              <p className="text-xs text-slate-400 hidden sm:block font-mono text-[11px]">
+                Autonomous Payment Recovery Engine
               </p>
             </div>
           </div>
 
           {/* Navigation Tabs */}
-          <nav className="flex items-center space-x-1 sm:space-x-2">
+          <nav className="flex items-center space-x-1 sm:space-x-2 overflow-x-auto py-1">
             {navItems.map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
@@ -59,7 +60,7 @@ export default function Navbar({ activeTab, setActiveTab, liveStatus }) {
                 <button
                   key={item.id}
                   onClick={() => setActiveTab(item.id)}
-                  className={`relative flex items-center space-x-2 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all duration-150 ${
+                  className={`relative flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-150 whitespace-nowrap ${
                     isActive
                       ? 'bg-slate-800 text-white shadow-sm border border-slate-700'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
@@ -79,7 +80,7 @@ export default function Navbar({ activeTab, setActiveTab, liveStatus }) {
             })}
           </nav>
 
-          {/* GitHub & Live indicator */}
+          {/* GitHub link */}
           <div className="flex items-center space-x-3">
             <a
               href="https://github.com/rehan0018/Alaadin"
