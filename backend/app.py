@@ -5,12 +5,19 @@ Agent Failure Lab, Webhook Ingestion with Idempotency, and Real-time WebSocket S
 """
 
 import os
+import sys
 import io
 import csv
 import json
 import asyncio
 import random
 from datetime import datetime
+
+# Automatically ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Body, Response
 from fastapi.middleware.cors import CORSMiddleware
